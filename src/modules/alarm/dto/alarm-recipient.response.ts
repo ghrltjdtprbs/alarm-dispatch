@@ -1,4 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
+
 import { AlarmRecipient } from '../alarm-recipient.entity';
 import { RecipientStatus } from '../recipient-status.enum';
 

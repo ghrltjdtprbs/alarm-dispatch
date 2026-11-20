@@ -1,4 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
+
 import { ErrorCode } from '../exception/error-code';
 
 export class ErrorBody {

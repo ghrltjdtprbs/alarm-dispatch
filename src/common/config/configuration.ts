@@ -19,11 +19,15 @@ export const envValidationSchema = Joi.object({
   REDIS_PORT: Joi.number().port().default(6379),
 
   MOCK_API_BASE_URL: Joi.string().uri().required(),
-  // mock 한도는 50/s. 초 경계 집계 차이로 429 가 나지 않도록 기본값에 10% 마진을 둔다
-  SEND_RATE_LIMIT_PER_SEC: Joi.number().integer().min(1).max(50).default(45),
+  // mock 한도는 50/s. 토큰 버킷 용량(rate 의 10%) 을 더해도 1초 창에서 50 을 넘지 않도록 상한 45
+  SEND_RATE_LIMIT_PER_SEC: Joi.number().integer().min(1).max(45).default(45),
   SEND_REQUEST_TIMEOUT_MS: Joi.number().integer().min(100).default(5000),
   // 5xx/네트워크 오류 재시도 상한 (429·타임아웃은 세지 않음)
   SEND_MAX_ATTEMPTS: Joi.number().integer().min(1).default(5),
+  // 타임아웃(발송됐을 수 있음) 뒤 clientRef 조회까지 기다리는 시간
+  SEND_RECONCILE_DELAY_MS: Joi.number().integer().min(1000).default(5000),
+  // 기동 시 마이그레이션 적용 여부. compose 에서는 api 만 true (워커 여러 대가 동시에 돌리면 경합)
+  RUN_MIGRATIONS: Joi.boolean().default(false),
   // 수신자 PROCESSING 점유 시간. 만료 후에도 PROCESSING 이면 워커 사망으로 보고 복구한다
   SEND_LEASE_SEC: Joi.number().integer().min(10).default(60),
   // 워커 프로세스당 동시 처리 잡 수. mock 응답의 5% 가 3초, 2% 가 타임아웃(5초)이라 평균 점유 ≈0.35초 → 45 rps 를 채우려면 20 이상 필요
@@ -37,6 +41,7 @@ export type NodeEnv = 'local' | 'test' | 'production';
 export interface AppConfig {
   env: NodeEnv;
   port: number;
+  runMigrations: boolean;
 }
 
 export interface DbConfig {
@@ -63,6 +68,7 @@ export interface WorkerConfig {
   concurrency: number;
   maxAttempts: number;
   leaseSec: number;
+  reconcileDelayMs: number;
   recoverySweepIntervalMs: number;
 }
 
@@ -79,6 +85,7 @@ export const configuration = (): Configuration => ({
   app: {
     env: process.env.NODE_ENV as NodeEnv,
     port: Number(process.env.API_PORT),
+    runMigrations: process.env.RUN_MIGRATIONS === 'true',
   },
   db: {
     host: process.env.DB_HOST as string,
@@ -101,6 +108,7 @@ export const configuration = (): Configuration => ({
     concurrency: Number(process.env.WORKER_CONCURRENCY),
     maxAttempts: Number(process.env.SEND_MAX_ATTEMPTS),
     leaseSec: Number(process.env.SEND_LEASE_SEC),
+    reconcileDelayMs: Number(process.env.SEND_RECONCILE_DELAY_MS),
     recoverySweepIntervalMs: Number(process.env.RECOVERY_SWEEP_INTERVAL_MS),
   },
 });

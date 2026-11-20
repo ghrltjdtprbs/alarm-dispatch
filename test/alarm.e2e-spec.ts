@@ -1,17 +1,20 @@
 import { getQueueToken } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import * as request from 'supertest';
+
+import { ApiVersion } from '../src/common/constant/api-version';
 import { PagedResponse } from '../src/common/dto/paged-response.dto';
 import { ResponseDTO } from '../src/common/dto/response.dto';
 import { AlarmStatus } from '../src/modules/alarm/alarm-status.enum';
 import { AlarmType } from '../src/modules/alarm/alarm-type.enum';
-import { AlarmDetailResponse, AlarmResponse } from '../src/modules/alarm/dto/alarm.response';
+import { AlarmResponse } from '../src/modules/alarm/dto/alarm.response';
+import { AlarmDetailResponse } from '../src/modules/alarm/dto/alarm-detail.response';
 import { AlarmRecipientResponse } from '../src/modules/alarm/dto/alarm-recipient.response';
 import { DISPATCH_QUEUE, prepareJobId } from '../src/modules/dispatch/dispatch-job';
 import { runConcurrently } from './support/concurrency.support';
 import { createTestApp, TestContext } from './support/integration-test.support';
 
-const BASE = '/api/v1/alarms';
+const BASE = `/${ApiVersion.V1_BASE}/alarms`;
 
 describe('알림 API (e2e)', () => {
   let ctx: TestContext;
@@ -67,11 +70,36 @@ describe('알림 API (e2e)', () => {
       expect((res.body as ResponseDTO<null>).error?.code).toBe('ALARM_RECIPIENTS_INVALID');
     });
 
+    it.each([
+      [
+        '수신자 101명',
+        { type: 'URGENT', title: 't', body: 'b', recipientIds: Array.from({ length: 101 }, (_, i) => `u_${i}`) },
+      ],
+      ['빈 수신자 id', { type: 'URGENT', title: 't', body: 'b', recipientIds: [''] }],
+      ['공백만 있는 제목', { title: '   ', body: 'b' }],
+      ['201자 제목', { title: 'x'.repeat(201), body: 'b' }],
+      ['모르는 종류', { type: 'NORMAL', title: 't', body: 'b' }],
+    ])('%s 는 400 VALIDATION_FAILED', async (_name, payload) => {
+      const res = await request(ctx.server).post(BASE).send(payload).expect(400);
+      expect((res.body as ResponseDTO<null>).error?.code).toBe('VALIDATION_FAILED');
+    });
+
+    it('JSON 이 아닌 본문은 500 이 아니라 400 VALIDATION_FAILED', async () => {
+      const res = await request(ctx.server)
+        .post(BASE)
+        .set('content-type', 'application/json')
+        .send('{bad json')
+        .expect(400);
+      expect((res.body as ResponseDTO<null>).error?.code).toBe('VALIDATION_FAILED');
+    });
+
     it('제목이 비거나 모르는 필드가 있으면 400 VALIDATION_FAILED 와 상세 사유', async () => {
       const res = await request(ctx.server).post(BASE).send({ title: '', body: 'b', foo: 1 }).expect(400);
       const body = res.body as ResponseDTO<null>;
       expect(body.error?.code).toBe('VALIDATION_FAILED');
-      expect(body.error?.details?.length).toBeGreaterThan(0);
+      expect(body.error?.details).toEqual(
+        expect.arrayContaining([expect.stringContaining('title'), expect.stringContaining('foo')]),
+      );
     });
   });
 
@@ -95,20 +123,31 @@ describe('알림 API (e2e)', () => {
     it('없는 알림은 404 ALARM_NOT_FOUND, uuid 형식이 아니면 400', async () => {
       const res = await request(ctx.server).get(`${BASE}/3f1c2a9e-8b1d-4c2a-9f1e-2d3c4b5a6f70`).expect(404);
       expect((res.body as ResponseDTO<null>).error?.code).toBe('ALARM_NOT_FOUND');
-      await request(ctx.server).get(`${BASE}/not-uuid`).expect(400);
+      const bad = await request(ctx.server).get(`${BASE}/not-uuid`).expect(400);
+      expect((bad.body as ResponseDTO<null>).error?.code).toBe('VALIDATION_FAILED');
+    });
+
+    it.each([
+      ['size 101', { size: 101 }],
+      ['page -1', { page: -1 }],
+      ['모르는 status', { status: 'BOGUS' }],
+    ])('목록 쿼리 %s 는 400', async (_name, query) => {
+      await request(ctx.server).get(BASE).query(query).expect(400);
     });
 
     it('수신자 목록은 상태 필터와 페이징으로 조회된다', async () => {
       const alarm = await createAlarm({ type: AlarmType.URGENT, recipientIds: ['u_000001', 'u_000002', 'u_000003'] });
+      await ctx.dataSource.query(`UPDATE alarm_recipients SET status = 'FAILED' WHERE recipient_id = 'u_000003'`);
       const res = await request(ctx.server)
         .get(`${BASE}/${alarm.id}/recipients`)
-        .query({ status: 'PENDING', size: 2 })
+        .query({ status: 'PENDING', size: 1 })
         .expect(200);
       const page = (res.body as ResponseDTO<PagedResponse<AlarmRecipientResponse>>)
         .data as PagedResponse<AlarmRecipientResponse>;
-      expect(page.totalElements).toBe(3);
-      expect(page.items).toHaveLength(2);
+      expect(page.totalElements).toBe(2);
+      expect(page.items).toHaveLength(1);
       expect(page.items[0]).toMatchObject({ recipientId: 'u_000001', status: 'PENDING', messageId: null });
+      await request(ctx.server).get(`${BASE}/${alarm.id}/recipients`).query({ status: 'BOGUS' }).expect(400);
     });
   });
 
@@ -116,7 +155,9 @@ describe('알림 API (e2e)', () => {
     it('CREATED 알림은 202 와 PREPARING 을 돌려주고 prepare 잡이 큐에 들어간다', async () => {
       const alarm = await createAlarm();
       const res = await request(ctx.server).post(`${BASE}/${alarm.id}/send`).expect(202);
-      expect((res.body as ResponseDTO<AlarmResponse>).data?.status).toBe(AlarmStatus.PREPARING);
+      const body = (res.body as ResponseDTO<AlarmResponse>).data as AlarmResponse;
+      expect(body.status).toBe(AlarmStatus.PREPARING);
+      expect(new Date(body.updatedAt).getTime()).toBeGreaterThanOrEqual(new Date(alarm.updatedAt).getTime());
 
       const job = await queue.getJob(prepareJobId(alarm.id));
       expect(job?.data).toEqual({ alarmId: alarm.id, type: AlarmType.BULK });
@@ -162,7 +203,7 @@ describe('알림 API (e2e)', () => {
       await request(ctx.server).post(`${BASE}/${alarm.id}/send`).expect(409);
     });
 
-    it('동시에 취소와 발송 시작이 와도 둘 중 하나만 성공한다', async () => {
+    it('동시에 취소와 발송 시작이 와도 각각 최대 한 번만 성공한다', async () => {
       const alarm = await createAlarm();
       const results: string[] = [];
       await runConcurrently(6, async (i) => {

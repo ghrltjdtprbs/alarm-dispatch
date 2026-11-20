@@ -25,7 +25,7 @@ NestJS 로 약 10만 명에게 알림을 보내는 시스템. API(생성·목록
 | ID | 내용 | 대응 방식 |
 | --- | --- | --- |
 | N-1 | 동시 요청(시작/취소/조회)과 워커 처리가 같은 데이터를 건드려도 상태 불일치·중복·누락 없음 | 조건부 원자 UPDATE 로 상태 전이, 수신자 (alarm_id, recipient_id) 유니크, claim/settle 조건부 UPDATE |
-| N-2 | 50 rps 초과 금지, 429 지속 금지 | Redis 토큰 버킷(Lua, 전역) + 429 시 `Retry-After` 만큼 큐 전역 일시정지 |
+| N-2 | 50 rps 초과 금지, 429 지속 금지 | Redis 토큰 버킷(Lua, 전역) + 429 시 `Retry-After` 를 버킷 `pause_until` 에 기록해 모든 워커의 호출 일시정지 |
 | N-3 | 5xx 일시 오류 복구 | 지수 백오프 재시도, 상한 후 FAILED |
 | N-4 | 타임아웃(발송됐을 수 있음) 중복 발송 금지 | UNKNOWN 으로 두고 `GET /v1/messages?clientRef=` 조회로 확정 후 미발송일 때만 재시도 |
 | N-5 | 400 영구 실패 | 재시도 없이 FAILED(영구) |
@@ -49,7 +49,7 @@ NestJS 로 약 10만 명에게 알림을 보내는 시스템. API(생성·목록
 | Q-2 | 취소 가능 상태, 취소 시 이미 보낸 건 | `CREATED/PREPARING/SENDING` 에서 취소 가능. 보낸 건은 `SENT` 유지, 미발송 `PENDING` 은 `CANCELLED`, 호출 중(PROCESSING) 건은 결과대로 기록 | 외부로 나간 발송은 되돌릴 수 없음 |
 | Q-3 | 수신자 적재 시점·주체 | 대량: 발송 시작 시 **워커**가 mock 사용자 API 를 커서로 읽어 적재(`PREPARING`). 긴급: 생성 시 지정 수신자를 바로 적재 | 10만 건 적재는 수십 초 → API 요청 안에서 하면 타임아웃·중복 위험 |
 | Q-4 | 타임아웃 건 최종 상태 | `UNKNOWN` → 백오프 후 clientRef 조회 → 있으면 `SENT`, 없으면 재발송. 취소된 알림이면 재발송 대신 `CANCELLED` | mock 이 clientRef 조회 API 를 제공 (`docs/mock-api.md`) |
-| Q-5 | 재시도·백오프·429·안전 마진 | 5xx/네트워크 오류 최대 5회, 지수 백오프 1s×2ⁿ(상한 30s). 429 는 시도 횟수에 안 세고 `Retry-After` 초 동안 큐 전역 일시정지. 토큰 버킷 기본 45 rps(10% 마진) | 경계 초 단위 집계 차이로 50 꽉 채우면 간헐 429 |
+| Q-5 | 재시도·백오프·429·안전 마진 | 5xx/연결 거부 최대 5회, 지수 백오프 1s×2ⁿ(상한 30s). 소켓 끊김은 타임아웃과 같이 조회로 확정. 429 는 시도 횟수에 안 세고 `Retry-After` 동안 토큰 버킷 전역 일시정지. 토큰 버킷 상한 45 rps(10% 마진) | 경계 초 단위 집계 차이로 50 꽉 채우면 간헐 429 |
 | Q-6 | 큐/조정 계층 | Redis + BullMQ (잡 = 수신자 1명). DB(PostgreSQL) 가 상태의 단일 진실 | 분배·우선순위·stalled 복구가 내장. 상태는 DB 에 있어 큐가 날아가도 복구 스윕으로 재투입 가능 |
 | Q-7 | 긴급 수신자 지정 방식 | 생성 요청의 `recipientIds: string[]`(1~100, mock 사용자 `id`). 존재 여부는 발송 시 mock 이 판정(`UNKNOWN_RECIPIENT` → FAILED) | mock 에 사용자 단건 조회 API 가 없음 |
 | Q-8 | 발송 시작 응답 코드 | `202 Accepted` + 알림 현재 상태 | 비동기 처리 수락의 표준 시맨틱 |
@@ -127,7 +127,7 @@ Worker prepare 잡: BULK 면 mock /v1/users 커서(limit 1000) 순회 → 1000�
 Worker send 잡(수신자 1명):
   [1] claim   조건부 UPDATE: PENDING→PROCESSING WHERE 알림 status IN (PREPARING, SENDING). affected 0 → 상태 보고 분기(UNKNOWN 이면 reconcile, 그 외 no-op)
   [2] call    토큰 버킷 대기 → POST /v1/messages (timeout 5s)
-  [3] settle  조건부 UPDATE WHERE status = PROCESSING → SENT/FAILED/PENDING/UNKNOWN. SENT/FAILED 면 미종결 0건 확인 → SENDING→COMPLETED
+  [3] settle  조건부 UPDATE WHERE status = PROCESSING AND lease_until = 내 펜스 → SENT/FAILED/PENDING/UNKNOWN. SENT/FAILED 면 미종결 0건 확인 → SENDING→COMPLETED
 ```
 
 | 장애·경합 시나리오 | 대응 |
@@ -137,7 +137,7 @@ Worker send 잡(수신자 1명):
 | send 중 워커 사망(docker kill) | BullMQ stalled 감지로 잡 재투입 → 행이 PROCESSING + lease 만료 → reconcile(clientRef 조회) → SENT 또는 재발송 |
 | 큐 자체 유실/잡 영구 실패 | 워커의 주기 스윕: lease 만료 PROCESSING·오래된 UNKNOWN·PENDING(잡 없음) 을 다시 addBulk(jobId dedupe) |
 | 취소 vs 진행 중 발송 | 취소 시 PENDING 일괄 CANCELLED + 알림 CANCELLED. claim 이 알림 상태를 조건으로 하므로 이후 잡은 no-op(토큰 안 씀). 호출 중 건은 결과대로 |
-| 429 | 행 PENDING 복귀, `worker.rateLimit(retryAfter)` 로 큐 전역 일시정지, 잡 재투입(시도 미차감) |
+| 429 | 행 PENDING 복귀, 토큰 버킷 `pause_until` 로 전역 일시정지, 잡 지연 재투입(시도 미차감) |
 | 타임아웃 | UNKNOWN + 지연 재시도 → 조회로 확정 |
 | 완료 판정 경합(마지막 2건 동시 settle) | 둘 다 미종결 0 을 보더라도 SENDING→COMPLETED 조건부 UPDATE 는 1건만 성공 |
 

@@ -1,6 +1,7 @@
 import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable } from '@nestjs/common';
 import { Job, Queue } from 'bullmq';
+
 import { AlarmType } from '../alarm/alarm-type.enum';
 import {
   DISPATCH_QUEUE,
@@ -13,7 +14,7 @@ import {
   sendJobId,
 } from './dispatch-job';
 
-// 큐 투입 전담. API(발송 시작) 와 워커(prepare → send 잡 투입, 복구 스윕) 양쪽이 쓴다. 소비는 워커 전용 모듈에서만
+/** 큐 투입 전담. API(발송 시작) 와 워커(prepare → send 잡 투입, 복구 스윕) 양쪽이 쓴다. 소비는 워커 전용 모듈에서만. */
 @Injectable()
 export class DispatchQueueProducer {
   constructor(@InjectQueue(DISPATCH_QUEUE) private readonly queue: Queue) {}
@@ -56,9 +57,15 @@ export class DispatchQueueProducer {
         continue;
       }
       const state: string = await job.getState();
+      if (state === 'failed') {
+        // 실패한 잡이 남아 있으면 같은 jobId 재투입이 막히므로 지우고 새로 넣는다 (상태의 진실은 DB 행)
+        await job.remove();
+        missing.push(recipientId);
+        continue;
+      }
       if (state === 'prioritized' || state === 'waiting') {
-        const priority = retryPriority(job.opts.priority);
-        if (priority !== job.opts.priority) {
+        const priority = retryPriority(job.priority);
+        if (priority !== job.priority) {
           await job.changePriority({ priority });
           promoted += 1;
         }

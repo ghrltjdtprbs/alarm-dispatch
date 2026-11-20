@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+
 import { WorkerModule } from './worker.module';
 
 // 발송 워커 진입점. HTTP 없이 애플리케이션 컨텍스트만 띄운다 (createApplicationContext 가 init 까지 수행).

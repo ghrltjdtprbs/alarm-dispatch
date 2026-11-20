@@ -1,5 +1,6 @@
-import 'dotenv/config';
 import { DataSource } from 'typeorm';
+
+import 'dotenv/config';
 
 // TypeORM CLI(migration:generate/run) 전용 DataSource. 앱 런타임은 typeorm.config.ts 를 쓴다
 export default new DataSource({

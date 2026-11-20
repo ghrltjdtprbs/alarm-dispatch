@@ -1,8 +1,8 @@
+import { Alarm } from '../src/modules/alarm/alarm.entity';
+import { AlarmRepository } from '../src/modules/alarm/alarm.repository';
 import { AlarmRecipientRepository } from '../src/modules/alarm/alarm-recipient.repository';
 import { AlarmStatus } from '../src/modules/alarm/alarm-status.enum';
 import { AlarmType } from '../src/modules/alarm/alarm-type.enum';
-import { AlarmRepository } from '../src/modules/alarm/alarm.repository';
-import { Alarm } from '../src/modules/alarm/alarm.entity';
 import { RecipientStatus } from '../src/modules/alarm/recipient-status.enum';
 import { runConcurrently } from './support/concurrency.support';
 import { createTestApp, TestContext } from './support/integration-test.support';
@@ -53,11 +53,18 @@ describe('AlarmRecipientRepository (e2e)', () => {
     expect(await recipients.claim(alarm.id, 'u_1', future())).toBe(false);
   });
 
-  it('settle 은 PROCESSING 행만 바꾸고 lease 를 비운다', async () => {
+  it('settle 은 내 lease(펜스) 로 점유한 PROCESSING 행만 바꾸고 lease 를 비운다', async () => {
     const alarm = await createAlarm(AlarmStatus.SENDING, ['u_1', 'u_2']);
-    await recipients.claim(alarm.id, 'u_1', future());
-    expect(await recipients.settle(alarm.id, 'u_1', { status: RecipientStatus.SENT, messageId: 'm_1' })).toBe(true);
-    expect(await recipients.settle(alarm.id, 'u_2', { status: RecipientStatus.SENT })).toBe(false);
+    const lease = future();
+    await recipients.claim(alarm.id, 'u_1', lease);
+    // 다른 펜스(다른 워커의 점유라고 가정) 로는 기록할 수 없다
+    expect(await recipients.settle(alarm.id, 'u_1', past(), { status: RecipientStatus.SENT, messageId: 'm_x' })).toBe(
+      false,
+    );
+    expect(await recipients.settle(alarm.id, 'u_1', lease, { status: RecipientStatus.SENT, messageId: 'm_1' })).toBe(
+      true,
+    );
+    expect(await recipients.settle(alarm.id, 'u_2', lease, { status: RecipientStatus.SENT })).toBe(false);
     const row = await recipients.findOne(alarm.id, 'u_1');
     expect(row).toMatchObject({ status: RecipientStatus.SENT, messageId: 'm_1', leaseUntil: null });
   });
@@ -96,12 +103,28 @@ describe('AlarmRecipientRepository (e2e)', () => {
     expect(found).toEqual(['u_dead', 'u_old_unknown']);
   });
 
+  it('취소된 알림은 결과 확인이 필요한 PROCESSING/UNKNOWN 만 복구 대상이고 PENDING 은 제외한다', async () => {
+    const alarm = await createAlarm(AlarmStatus.CANCELLED, ['u_pending', 'u_unknown']);
+    await ctx.dataSource.query(
+      `UPDATE alarm_recipients SET status = CASE recipient_id WHEN 'u_unknown' THEN 'UNKNOWN' ELSE status END,
+              updated_at = now() - interval '10 minutes' WHERE alarm_id = $1`,
+      [alarm.id],
+    );
+    const found = (await recipients.findRecoverable(120, 0, 100)).map((r) => r.recipientId);
+    expect(found).toEqual(['u_unknown']);
+  });
+
   it('cancelPending 은 PENDING 만 취소하고 hasUnsettled 는 미종결 여부를 알려준다', async () => {
     const alarm = await createAlarm(AlarmStatus.SENDING, ['u_1', 'u_2']);
-    await recipients.claim(alarm.id, 'u_1', future());
+    const lease = future();
+    await recipients.claim(alarm.id, 'u_1', lease);
     expect(await recipients.cancelPending(alarm.id)).toBe(1);
     expect(await recipients.hasUnsettled(alarm.id)).toBe(true);
-    await recipients.settle(alarm.id, 'u_1', { status: RecipientStatus.FAILED, lastError: 'X' });
+    await recipients.settle(alarm.id, 'u_1', lease, { status: RecipientStatus.FAILED, lastError: 'X' });
     expect(await recipients.hasUnsettled(alarm.id)).toBe(false);
+    // 종료된 알림에 뒤늦게 남은 PENDING 은 cancelIfPending 으로 정리된다
+    await recipients.insertPendingIgnoreDuplicates(alarm.id, ['u_late']);
+    expect(await recipients.cancelIfPending(alarm.id, 'u_late')).toBe(true);
+    expect(await recipients.cancelIfPending(alarm.id, 'u_late')).toBe(false);
   });
 });

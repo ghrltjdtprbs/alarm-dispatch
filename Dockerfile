@@ -1,7 +1,7 @@
 # API 와 Worker 가 같은 이미지를 쓰고 command 만 다르다 (docker-compose.yml 참조)
 FROM node:22-alpine AS deps
 WORKDIR /app
-COPY package.json package-lock.json* ./
+COPY package.json package-lock.json ./
 RUN npm ci
 
 FROM deps AS build

@@ -1,10 +1,13 @@
 import { Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+
 import { BaseEntity } from '../../common/entity/base.entity';
 import { AlarmStatus } from './alarm-status.enum';
 import { AlarmType } from './alarm-type.enum';
 
-// 알림. 상태 전이는 AlarmRepository.transition(조건부 UPDATE) 으로만 바꾼다 — 읽고-판단하고-쓰는 경합을 피하기 위해
-// 목록 조회가 status 필터 + createdAt 역순이라 복합 인덱스
+/**
+ * 알림. 상태 전이는 AlarmRepository.transition(조건부 UPDATE) 으로만 바꾼다 — 읽고-판단하고-쓰는 경합을 피하기 위해.
+ * 목록 조회가 status 필터 + createdAt 역순이라 복합 인덱스를 둔다.
+ */
 @Entity('alarms')
 @Index('idx_alarms_status_created_at', ['status', 'createdAt'])
 export class Alarm extends BaseEntity {

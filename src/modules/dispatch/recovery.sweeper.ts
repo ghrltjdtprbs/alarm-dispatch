@@ -1,16 +1,18 @@
+import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Queue } from 'bullmq';
+
 import { Configuration } from '../../common/config/configuration';
+import { AlarmRepository } from '../alarm/alarm.repository';
 import { AlarmRecipientRepository } from '../alarm/alarm-recipient.repository';
 import { AlarmStatus } from '../alarm/alarm-status.enum';
 import { AlarmType } from '../alarm/alarm-type.enum';
-import { AlarmRepository } from '../alarm/alarm.repository';
-import { InjectQueue } from '@nestjs/bullmq';
-import { Queue } from 'bullmq';
 import { DISPATCH_QUEUE } from './dispatch-job';
 import { DispatchQueueProducer } from './dispatch-queue.producer';
 
 const SWEEP_BATCH = 5_000;
+const ORPHAN_ALARM_BATCH = 100;
 // 이 시간보다 오래 UNKNOWN 에 머문 행은 잡이 유실된 것으로 본다 (정상 재시도 백오프 최대 30초보다 넉넉히)
 const STALE_RECIPIENT_SEC = 120;
 // PENDING 은 10만 건 대기열에서 정상적으로 수십 분 머무른다. 큐가 비어 있으면 즉시, 아니면 1시간 뒤 잡 유실로 본다
@@ -60,7 +62,10 @@ export class RecoverySweeper implements OnModuleInit, OnModuleDestroy {
       const recipients = await this.recoverOrphanRecipients();
       if (alarms + recipients > 0) this.logger.log(`[복구 스윕] alarms=${alarms} recipients=${recipients}`);
     } catch (error) {
-      this.logger.error(`[복구 스윕 실패] ${(error as Error).message}`, (error as Error).stack);
+      this.logger.error(
+        `[복구 스윕 실패] ${error instanceof Error ? error.message : String(error)}`,
+        error instanceof Error ? error.stack : undefined,
+      );
     } finally {
       this.running = false;
     }
@@ -68,7 +73,11 @@ export class RecoverySweeper implements OnModuleInit, OnModuleDestroy {
 
   // PREPARING 에 오래 머문 알림 = prepare 잡 유실. 다시 투입 (jobId 같으면 무시)
   private async recoverOrphanAlarms(): Promise<number> {
-    const stale = await this.alarmRepository.findStaleByStatus(AlarmStatus.PREPARING, STALE_PREPARING_SEC, 100);
+    const stale = await this.alarmRepository.findStaleByStatus(
+      AlarmStatus.PREPARING,
+      STALE_PREPARING_SEC,
+      ORPHAN_ALARM_BATCH,
+    );
     for (const alarm of stale) await this.producer.enqueuePrepare(alarm.id, alarm.type);
     return stale.length;
   }
@@ -86,7 +95,7 @@ export class RecoverySweeper implements OnModuleInit, OnModuleDestroy {
     }
     for (const [alarmId, group] of byAlarm) {
       const { added, promoted } = await this.producer.requeueOrPromote(alarmId, group.type, group.ids);
-      if (added + promoted > 0) this.logger.log(`[복구 재투입] alarm=${alarmId} added=${added} promoted=${promoted}`);
+      if (added + promoted > 0) this.logger.log(`[복구 재투입] alarmId=${alarmId} added=${added} promoted=${promoted}`);
     }
     return rows.length;
   }

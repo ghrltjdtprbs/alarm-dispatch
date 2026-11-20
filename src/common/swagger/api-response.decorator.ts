@@ -1,5 +1,6 @@
 import { applyDecorators, Type } from '@nestjs/common';
 import { ApiExtraModels, ApiResponse, getSchemaPath } from '@nestjs/swagger';
+
 import { PagedResponse } from '../dto/paged-response.dto';
 import { ResponseDTO } from '../dto/response.dto';
 
@@ -62,20 +63,24 @@ export function ApiEmptyResponseDTO(status = 200, description = '성공') {
   );
 }
 
-// 에러 응답 문서화. errorCode(문자열) 를 넘기면 error.code 예시가 채워진다
-export function ApiErrorResponseDTO(status: number, description: string, errorCode?: string) {
+/**
+ * 에러 응답 문서화. 같은 status 에 @ApiResponse 를 두 번 붙이면 뒤가 앞을 덮으므로,
+ * 한 status 에서 날 수 있는 에러 코드는 배열로 한 번에 넘긴다 (description 과 error.code enum 에 반영).
+ */
+export function ApiErrorResponseDTO(status: number, description: string, errorCodes: string | string[]) {
+  const codes = Array.isArray(errorCodes) ? errorCodes : [errorCodes];
   return applyDecorators(
     ApiExtraModels(ResponseDTO),
     ApiResponse({
       status,
-      description,
+      description: `${description} (${codes.join(' / ')})`,
       schema: {
         allOf: [
           { $ref: getSchemaPath(ResponseDTO) },
           {
             properties: {
               code: { example: status },
-              error: { properties: { code: { example: errorCode ?? description } } },
+              error: { properties: { code: { enum: codes, example: codes[0] } } },
             },
           },
         ],

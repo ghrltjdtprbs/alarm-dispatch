@@ -2,6 +2,7 @@ import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
+
 import { Configuration, configuration, envValidationSchema } from './common/config/configuration';
 import { typeOrmOptions } from './common/config/typeorm.config';
 

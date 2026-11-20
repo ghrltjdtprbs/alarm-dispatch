@@ -18,7 +18,7 @@ open http://localhost:3000/docs     # Swagger UI (OpenAPI 3.0 JSON: /docs-json, 
 docker compose up --scale worker=3  # 워커 다중화
 ```
 
-- 기동 순서는 healthcheck 로 보장됩니다 (postgres·redis·mock 이 healthy 가 된 뒤 api·worker 시작). 운영 모드(`NODE_ENV=production`) 에서는 기동 시 마이그레이션이 자동 적용되므로 빈 DB 에서도 바로 동작합니다.
+- `.env` 가 없어도 compose 기본값으로 뜹니다. 기동 순서는 healthcheck 로 보장됩니다: postgres·redis → api(기동 시 마이그레이션 적용, `RUN_MIGRATIONS=true`) → api 가 healthy 가 된 뒤 worker. 마이그레이션은 api 한 프로세스만 돌려 워커 여러 대의 `CREATE TABLE` 경합을 피합니다.
 - 기동 로그에 `[API 기동] port=3000 docs=/docs`, `[워커 준비] queue=dispatch concurrency=25` 가 보이면 준비된 것입니다.
 
 테스트:
@@ -34,15 +34,19 @@ npm run lint && npm run build
 
 | 키 | 설명 | 기본값 |
 | --- | --- | --- |
+| `NODE_ENV` | `local` / `test` / `production` (compose 는 production) | `local` |
 | `API_PORT` | API 호스트 포트 | `3000` |
-| `DB_*` | PostgreSQL 접속 (compose 는 `postgres` 서비스로 고정) | `alarm`/`alarm`/`alarm` |
+| `DB_HOST`, `DB_PORT` | PostgreSQL 접속 (compose 는 `postgres:5432` 로 고정) | `localhost:5432` |
+| `DB_USERNAME`, `DB_PASSWORD`, `DB_NAME` | DB 계정·이름 | `alarm`/`alarm`/`alarm` |
+| `RUN_MIGRATIONS` | 기동 시 마이그레이션 적용. compose 는 api 만 true | `false` |
 | `DB_SYNCHRONIZE` | 로컬 개발용 스키마 자동 동기화. 운영에서는 무시되고 마이그레이션만 사용 | `false` |
 | `REDIS_*` | Redis 접속 | `localhost:6379` |
 | `MOCK_API_BASE_URL` | 외부 발송 mock 주소 (compose 내부는 `http://mock:4000`) | `http://localhost:4000` |
 | `MOCK_API_PORT` | mock 호스트 포트 | `4000` |
 | `SEND_RATE_LIMIT_PER_SEC` | 전역 처리량 제한 (mock 한도 50 에 10% 마진) | `45` |
 | `SEND_REQUEST_TIMEOUT_MS` | 외부 API 요청 타임아웃 (mock 지연 3초 이상을 감안) | `5000` |
-| `SEND_MAX_ATTEMPTS` | 5xx/네트워크 오류 재시도 상한 (429·타임아웃은 세지 않음) | `5` |
+| `SEND_MAX_ATTEMPTS` | 5xx/연결 거부 재시도 상한 (429·타임아웃은 세지 않음) | `5` |
+| `SEND_RECONCILE_DELAY_MS` | 타임아웃(발송됐을 수 있음) 뒤 clientRef 조회까지 대기 | `5000` |
 | `SEND_LEASE_SEC` | 수신자 점유(lease) 시간. 만료 후에도 처리 중이면 워커 사망으로 보고 복구 | `60` |
 | `WORKER_CONCURRENCY` | 워커 프로세스당 동시 처리 잡 수 | `25` |
 | `RECOVERY_SWEEP_INTERVAL_MS` | 고아 잡 복구 스윕 주기 | `60000` |
@@ -55,8 +59,8 @@ npm run lint && npm run build
 | --- | --- | --- | --- |
 | DB | PostgreSQL 16 | `UPDATE ... WHERE status = ?` 조건부 원자 UPDATE, `(alarm_id, recipient_id)` 유니크, `INSERT ... ON CONFLICT DO NOTHING` 으로 정합성을 DB 가 보장. 10만 행 배치 insert 가 재실행 안전 | MySQL 도 가능하지만 `RETURNING`·부분 인덱스가 없어 조건부 UPDATE 의 결과 확인이 번거로움 |
 | ORM | TypeORM 0.3 | Nest 공식 통합, 마이그레이션 CLI, QueryBuilder 로 조건부 UPDATE 작성이 쉬움 | Prisma 는 락·조건부 UPDATE 가 raw SQL 로 밀려 장점이 줄어듦 |
-| 큐 | Redis 7 + BullMQ | 워커 간 잡 분배(잡 lock)·우선순위·지연 재시도·stalled 잡 복구가 내장. `queue.rateLimit()` 으로 429 시 큐 전역 일시정지 | 잡 10만 개가 Redis 에 수십 MB 올라감. 큐가 유실돼도 DB 상태로 복구 스윕이 재투입 |
-| 처리량 제한 | Redis Lua 토큰 버킷 | 워커 수와 무관한 전역 제한, 긴급/대량이 같은 버킷을 공유. HTTP 호출 직전에만 토큰을 쓰므로 취소된 알림의 no-op 잡은 한도를 소모하지 않음 | BullMQ limiter 는 잡 단위·큐 단위라 no-op 잡도 제한에 걸리고 큐를 나누면 합산이 안 됨 |
+| 큐 | Redis 7 + BullMQ | 워커 간 잡 분배(잡 lock)·우선순위·지연 재시도·stalled 잡 복구가 내장 | 잡 10만 개가 Redis 에 수십 MB 올라감. 큐가 유실돼도 DB 상태로 복구 스윕이 재투입 |
+| 처리량 제한 | Redis Lua 토큰 버킷 | 워커 수와 무관한 전역 제한, 긴급/대량이 같은 버킷을 공유. HTTP 호출 직전에만 토큰을 쓰므로 취소된 알림의 no-op 잡은 한도를 소모하지 않음. 429 의 `Retry-After` 도 같은 키에 `pause_until` 로 기록해 모든 워커의 호출을 함께 멈춤 | BullMQ limiter 는 잡 단위·큐 단위라 no-op 잡도 제한에 걸리고, `queue.rateLimit()` 은 worker 에 limiter 옵션이 없으면 무시됨 |
 | HTTP 클라이언트 | Node 내장 `fetch` + `AbortSignal.timeout` | 의존성 없이 타임아웃 처리 | axios 도 무방 |
 | 검증·문서 | class-validator, `@nestjs/swagger` | DTO 한 곳에 검증 규칙과 문서를 같이 둠 | — |
 | 테스트 | Jest + supertest | Nest 기본. e2e 는 실제 PostgreSQL/Redis(`*_test` DB 가 아니면 기동 거부) | — |
@@ -152,9 +156,9 @@ API   POST /alarms/:id/send ── CREATED→PREPARING (조건부 UPDATE) ──
                   URGENT: 생성 시 적재된 수신자로 send 잡 투입
                   끝나면 PREPARING→SENDING
 워커  send 잡 (수신자 1명)
-      [1] claim   조건부 UPDATE: PENDING→PROCESSING, 단 알림이 PREPARING/SENDING 일 때만. 실패면 아무것도 하지 않고 종료
-      [2] call    토큰 버킷에서 토큰 획득 → POST /v1/messages (타임아웃 5초). 트랜잭션 밖
-      [3] settle  조건부 UPDATE(WHERE status = PROCESSING) 로 결과 기록 → 미종결 0건이면 SENDING→COMPLETED
+      [1] claim   조건부 UPDATE: PENDING→PROCESSING + lease_until(펜스), 단 알림이 PREPARING/SENDING 일 때만. 실패면 보내지 않고 종료
+      [2] call    토큰 버킷에서 토큰 획득 → (lease 가 거의 끝났으면 생략) → POST /v1/messages (타임아웃 5초). 트랜잭션 밖
+      [3] settle  조건부 UPDATE(WHERE status = PROCESSING AND lease_until = 내 펜스) 로 결과 기록 → 미종결 0건이면 SENDING→COMPLETED
 ```
 
 외부 API 응답별 처리 (`src/modules/dispatch/send.service.ts`):
@@ -163,11 +167,11 @@ API   POST /alarms/:id/send ── CREATED→PREPARING (조건부 UPDATE) ──
 | --- | --- |
 | 202 | `SENT`, messageId 저장 |
 | 400 (`RECIPIENT_BLOCKED`, `UNKNOWN_RECIPIENT`) | 재시도 없이 `FAILED`. 재시도는 낭비이고 한도만 소모 |
-| 429 | 보내지지 않은 것으로 보고 `PENDING` 복귀, 시도 횟수 미차감. `queue.rateLimit(Retry-After)` 로 **모든 워커의 큐 소비를 일시정지** |
-| 500 / 503 / 네트워크 오류 | `attempt_count + 1`, 지수 백오프(1s × 2ⁿ, 최대 30s) 후 재시도. 상한(5회) 도달 시 `FAILED` |
-| 타임아웃 | **재전송하지 않고** `UNKNOWN`. 3초 뒤 `GET /v1/messages?clientRef=` 로 처리 여부를 확인해 있으면 `SENT`, 없으면 그제야 재발송 (알림이 취소됐으면 `CANCELLED`) |
+| 429 | 보내지지 않은 것으로 보고 `PENDING` 복귀, 시도 횟수 미차감. 토큰 버킷에 `Retry-After` 만큼 `pause_until` 을 기록해 **모든 워커의 외부 호출을 함께 일시정지** |
+| 500 / 503 / 연결 거부(ECONNREFUSED 등) | 서버에 닿지 않았으므로 `attempt_count + 1`, 지수 백오프(1s × 2ⁿ, 최대 30s) 후 재시도. 상한(5회) 도달 시 `FAILED` |
+| 타임아웃 / 소켓 끊김 | 서버가 처리했을 수 있으므로 **재전송하지 않고** `UNKNOWN`. 5초 뒤 `GET /v1/messages?clientRef=` 로 처리 여부를 확인해 있으면 `SENT`, 없으면 그제야 재발송 (알림이 취소됐으면 `CANCELLED`) |
 
-처리량 제한: Redis Lua 토큰 버킷 (`src/modules/dispatch/rate-limiter.ts`). 보충·차감이 하나의 스크립트라 워커 여러 대가 동시에 와도 초과 발급이 없고, 버킷 용량을 rate 의 10% 로 작게 둬 어떤 1초 창에서도 통과 건수가 `rate + 용량 ≤ 50` 을 넘지 않습니다. 실측(워커 1대, 동시성 25) 약 40 rps, 429 0건.
+처리량 제한: Redis Lua 토큰 버킷 (`src/modules/dispatch/rate-limiter.ts`). 보충·차감이 하나의 스크립트라 워커 여러 대가 동시에 와도 초과 발급이 없고, 버킷 용량을 rate 의 10% 로 작게 둬 어떤 1초 창에서도 통과 건수가 `rate + 용량 ≤ 50` 을 넘지 않습니다 (`SEND_RATE_LIMIT_PER_SEC` 상한 45). 사용자 목록 조회와 clientRef 조회도 같은 버킷을 씁니다. 실측(워커 1대, 동시성 25) 약 40 rps, 429 0건.
 
 `clientRef` 는 `${alarmId}:${recipientId}` 로 결정적입니다. mock 이 중복을 막지 않으므로 멱등성은 우리 상태 테이블이 책임지고, clientRef 는 타임아웃 뒤 "실제로 보내졌는지" 를 되묻는 키로 씁니다. BullMQ `jobId` 도 같은 규칙(`send-{alarmId}-{recipientId}`)이라 같은 수신자 잡이 두 번 투입되지 않습니다.
 
@@ -177,11 +181,12 @@ API   POST /alarms/:id/send ── CREATED→PREPARING (조건부 UPDATE) ──
 | --- | --- | --- |
 | 발송 시작 동시 N회 | `UPDATE alarms SET status='PREPARING' WHERE id=? AND status='CREATED'` → affected 1 인 요청만 큐 투입, 나머지 409 | 읽고-판단하고-쓰는 흐름이 없으니 락·버전 컬럼 없이 DB 가 경합을 끝냄 |
 | 시작 vs 취소 경합 | 둘 다 조건부 UPDATE. 취소는 PREPARING/SENDING 에서도 허용 | 취소가 늦게 와도 워커가 claim 때 알림 상태를 다시 확인하므로 추가 발송 없음 |
-| 워커 간 중복 claim | BullMQ 잡 lock(1차) + 수신자 행 조건부 UPDATE(2차) | stalled 로 잡이 두 번 전달돼도 행 상태가 PROCESSING/SENT 면 보내지 않음 |
-| 취소 vs 진행 중 발송 | 취소 시 PENDING 일괄 CANCELLED. 호출 중(PROCESSING) 건은 결과대로 기록, 큐에 남은 잡은 claim 실패로 no-op (토큰 미소모) | 이미 외부로 나간 발송은 되돌릴 수 없음 |
+| 워커 간 중복 claim | BullMQ 잡 lock(1차) + 수신자 행 조건부 UPDATE(2차) + lease 펜스(3차) | stalled 로 잡이 두 번 전달돼도 행 상태가 PROCESSING/SENT 면 보내지 않음. 멈췄다 늦게 깨어난 워커는 lease 가 바뀌어 있어 보내지도 기록하지도 못함 |
+| 취소 vs 진행 중 발송 | 취소는 알림 전이 + PENDING 일괄 CANCELLED 를 한 트랜잭션으로. 호출 중(PROCESSING) 건은 결과대로 기록, 큐에 남은 잡은 claim 실패로 no-op (토큰 미소모). 429/5xx 로 뒤늦게 PENDING 으로 돌아온 행은 다음 실행이 CANCELLED 로 정리 | 이미 외부로 나간 발송은 되돌릴 수 없음 |
 | 타임아웃 중복 방지 | UNKNOWN 으로 두고 clientRef 조회 후에만 재발송 | 무조건 재전송하면 2% 가 중복, 무조건 실패 처리하면 누락 |
 | 워커 사망 (kill -9) | BullMQ stalled 감지(15초)로 잡 재전달 → 행이 PROCESSING + lease 만료 → 결과 확인 경로. 2차로 주기 스윕이 lease 만료·오래된 UNKNOWN 을 재투입 | 실측: 발송 중 kill -9 → PROCESSING 고아 10건 → 60초 내 전부 복구, 중복 0 |
-| 큐 유실 / 잡 영구 실패 | 스윕이 DB 기준으로 재투입. 큐에 아직 있는 잡은 우선순위만 올림 | 상태의 진실이 DB 라 Redis 가 비워져도 이어서 발송 가능 |
+| 큐 유실 / 잡 영구 실패 | 스윕이 DB 기준으로 재투입. 큐에 아직 있는 잡은 우선순위만 올리고, 실패로 남은 잡은 지우고 새로 넣음 (실패 잡은 보관하지 않아 같은 jobId 재투입이 막히지 않음) | 상태의 진실이 DB 라 Redis 가 비워져도 이어서 발송 가능 |
+| 워커 종료 순서 | `onModuleDestroy` 에서 BullMQ 워커를 먼저 닫아 진행 중 잡을 끝낸 뒤, `onApplicationShutdown` 에서 토큰 버킷 Redis 연결을 닫음 | 반대로 하면 호출 직전 잡들이 "Connection is closed" 로 실패 |
 | 완료 판정 경합 | 마지막 두 수신자가 동시에 끝나도 `SENDING→COMPLETED` 조건부 UPDATE 는 한 번만 성공 | 카운터 컬럼 증감 대신 `EXISTS` 조회라 핫로우 경합이 없음 |
 | 수신자 적재 중단 | `(alarm_id, recipient_id)` 유니크 + `ON CONFLICT DO NOTHING`, 잡은 jobId 로 dedupe | prepare 잡이 중간에 죽어 다시 돌아도 중복·누락 없음 |
 
@@ -194,15 +199,16 @@ API   POST /alarms/:id/send ── CREATED→PREPARING (조건부 UPDATE) ──
 **워커 다중화** (`docker compose up --scale worker=3`)
 - 작업 분배: BullMQ 가 잡 단위로 워커에 lock 을 주어 분배합니다. 같은 잡이 두 워커에 가는 일은 lock 이 막고, 혹시 stalled 로 재전달돼도 수신자 행의 조건부 UPDATE 가 2차로 막습니다.
 - 처리량 준수: 토큰 버킷이 Redis 에 하나뿐이라 워커가 몇 대든 합산 45 rps 입니다. 429 를 받으면 `queue.rateLimit()` 으로 모든 워커가 함께 멈춥니다.
-- 종료 복구: SIGTERM 은 graceful shutdown(진행 중 잡 완료 후 종료). SIGKILL 은 stalled 감지 → 다른 워커가 잡을 받아 lease 만료 행을 결과 확인 경로로 처리합니다. 주기 스윕이 2차 안전망입니다.
+- 종료 복구: SIGTERM 은 graceful shutdown(새 잡을 받지 않고 진행 중 잡 완료 후 종료, 실측 1~6초). SIGKILL 은 stalled 감지 → 다른 워커가 잡을 받아 lease 만료 행을 결과 확인 경로로 처리합니다. 주기 스윕이 2차 안전망입니다.
+- 마이그레이션: api 만 적용하고 worker 는 api 가 healthy 가 된 뒤 뜨므로 여러 워커가 동시에 스키마를 만들며 충돌하지 않습니다.
 
 ## 테스트 전략
 
 | 종류 | 위치 | 검증 내용 |
 | --- | --- | --- |
-| 단위 (33) | `src/**/*.spec.ts` | 상태 전이 표, 응답 래퍼·예외 필터, **발송 분기 전부**(2xx/400/429/5xx 상한/타임아웃/결과 확인 4가지) 를 fake 클라이언트·리포지토리로 인프라 없이 |
-| e2e API (18) | `test/alarm.e2e-spec.ts` | 생성·검증 실패·목록·단건·수신자 목록, 발송 시작 **동시 10회 → 1건 202·9건 409·잡 1개**, 시작/취소 경합, 취소 후 수신자 상태 |
-| e2e 리포지토리 (7) | `test/alarm-recipient.repository.e2e-spec.ts` | 실제 PostgreSQL 에서 claim 동시 8회 → 1건 성공, 취소된 알림 claim 거부, settle 은 PROCESSING 만, reclaim 은 lease 만료만, 복구 대상 선별, 적재 재실행 중복 없음 |
+| 단위 (51) | `src/**/*.spec.ts` | 상태 전이 표, 응답 래퍼·예외 필터, 우선순위, **발송 분기 전부**(2xx/400/429/5xx 상한/연결 거부/소켓 끊김/타임아웃/lease 만료/펜스 불일치/결과 확인 4가지), mock 클라이언트 응답 매핑(fetch 스텁), prepare(커서 순회·취소 중단·재시도) 를 fake 로 인프라 없이 |
+| e2e API (27) | `test/alarm.e2e-spec.ts`, `test/health.e2e-spec.ts` | 생성·검증 실패(수신자 101명, 빈 id, 공백 제목, 잘못된 JSON 본문 → 400)·목록·단건·수신자 목록 필터, 발송 시작 **동시 10회 → 1건 202·9건 409·잡 1개**, 시작/취소 경합, 취소 후 수신자 상태 |
+| e2e 리포지토리 (8) | `test/alarm-recipient.repository.e2e-spec.ts` | 실제 PostgreSQL 에서 claim 동시 8회 → 1건 성공, 취소된 알림 claim 거부, settle 은 내 펜스로만, reclaim 은 lease 만료만, 복구 대상 선별(취소된 알림의 PENDING 제외), 적재 재실행 중복 없음 |
 | 수동 시나리오 | compose 기동 | 10만 명 발송 처리량·429 여부, 발송 중 워커 kill -9 복구, 발송 중 취소, 긴급 알림 끼어들기 |
 
 e2e 는 `.env.test` 의 `alarm_test` DB 와 별도 BullMQ 키 prefix 를 써서 로컬에서 돌고 있는 큐·데이터를 건드리지 않습니다. 테스트 DB 이름이 `_test` 로 끝나지 않으면 기동 자체를 거부합니다.
@@ -222,11 +228,13 @@ e2e 는 `.env.test` 의 `alarm_test` DB 와 별도 BullMQ 키 prefix 를 써서 
 
 ## 고민했던 지점 / 되돌린 결정 / 더 하고 싶은 것
 
-- **잡 단위**: 수신자 100명 배치 잡도 고려했지만, 느린 응답 하나가 배치를 막고 워커 사망 시 배치 전체를 재확인해야 해서 수신자 1명 = 잡 1개로 정했습니다. Redis 메모리(10만 잡 수십 MB)는 감수했고, 완료·실패 잡은 즉시 지워 이력을 Redis 에 쌓지 않습니다.
+- **잡 단위**: 수신자 100명 배치 잡도 고려했지만, 느린 응답 하나가 배치를 막고 워커 사망 시 배치 전체를 재확인해야 해서 수신자 1명 = 잡 1개로 정했습니다. Redis 메모리(10만 잡 수십 MB)는 감수했고, 완료·실패 잡은 즉시 지웁니다 (이력은 DB 행에 있고, 실패 잡이 남아 있으면 같은 jobId 재투입이 막힙니다).
 - **레이트리밋 위치**: 처음엔 BullMQ limiter 를 생각했지만 잡 단위 제한이라 취소된 알림의 no-op 잡까지 한도를 먹는 문제가 있어, HTTP 호출 직전에만 토큰을 쓰는 Lua 토큰 버킷으로 바꿨습니다.
 - **되돌린 결정 1 — claim 판정**: TypeORM `repository.query()` 가 UPDATE 문에 `[rows, rowCount]` 를 돌려주는 것을 몰라 `rows.length === 1` 로 판정했고, 점유에 성공하고도 "거절" 로 처리돼 발송이 나가지 않았습니다. 복구 스윕이 lease 만료 건을 되살려 겉으로는 "1~2분 늦게 발송" 처럼 보여 원인 찾기가 어려웠습니다. 종료 사유 로그를 추가해 `claim_rejected` 를 확인하고 고쳤으며, 실 DB 리포지토리 e2e 로 고정했습니다. 교훈: 복구 경로가 1차 경로의 버그를 가릴 수 있으니 1차 경로의 결과도 관측해야 합니다.
 - **되돌린 결정 2 — 재시도 잡의 우선순위**: BullMQ 는 지연 후 복귀한 잡을 같은 우선순위의 맨 뒤에 둡니다. 타임아웃 확인(UNKNOWN) 이 10만 건 뒤에서 기다리게 돼, 복귀 전에 `changePriority` 로 대량 잡은 5(긴급 뒤, 대량 앞)로 올리도록 바꿨습니다. 복구 스윕도 큐에 있는 잡은 재투입 대신 우선순위를 올립니다.
 - **동시성 10 → 25**: mock 응답의 5% 가 3초, 2% 가 5초 타임아웃이라 평균 점유가 약 0.35초였고, 10 슬롯으로는 20~25 rps 에 그쳤습니다. 25 로 올려 약 40 rps 를 냅니다.
+- **되돌린 결정 3 — 429 전역 정지와 종료 순서**: 처음엔 BullMQ `queue.rateLimit()` 으로 모든 워커를 멈추려 했지만, worker 에 `limiter` 옵션이 없으면 무시된다는 것을 BullMQ Lua 소스에서 확인하고 토큰 버킷의 `pause_until` 로 바꿨습니다. 또 토큰 버킷 Redis 연결을 `onModuleDestroy` 에서 닫았더니 SIGTERM 때 진행 중 잡 8건이 "Connection is closed" 로 실패하는 것을 발견해, 워커를 먼저 닫고 연결은 `onApplicationShutdown` 에서 닫도록 순서를 바꿨습니다.
+- **되돌린 결정 4 — settle 펜스**: 10만 건 발송 중 수신자 1명이 17ms 간격으로 두 번 발송된 것을 clientRef 조회로 발견했습니다. 멈췄다 늦게 깨어난 실행이 다른 워커의 재점유 뒤에 보내고 기록까지 덮어쓸 수 있어, claim 때 받은 lease 를 펜스로 삼아 settle 을 `lease_until = 내 펜스` 로 제한하고 토큰을 기다린 뒤 lease 가 거의 끝났으면 보내지 않도록 했습니다.
 - **더 하고 싶은 것**: 알림별 처리량 지표(발송 속도·실패율) 노출, 워커 상태 헬스 엔드포인트(큐 깊이·stalled 수), 긴급 알림 전용 SLA 측정, 취소된 알림의 큐 잔여 잡 즉시 제거(현재는 no-op 로 빠르게 소진), 마이그레이션 기반 schema 변경 테스트.
 
 ## AI 활용 방식

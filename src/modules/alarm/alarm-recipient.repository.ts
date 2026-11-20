@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, Repository } from 'typeorm';
+
 import { AlarmRecipient } from './alarm-recipient.entity';
 import { AlarmStatus } from './alarm-status.enum';
 import { AlarmType } from './alarm-type.enum';
@@ -26,7 +27,7 @@ export interface RecoverableRecipient {
 // 발송 가능한 알림 상태. claim 은 이 상태의 알림에 속한 수신자만 잡는다 (취소되면 바로 멈춘다)
 const SENDABLE_ALARM_STATUSES = [AlarmStatus.PREPARING, AlarmStatus.SENDING];
 
-// 수신자 상태 테이블 쿼리 전담. 10만 행 단위라 전부 집합 연산(배치 insert, 조건부 UPDATE, 집계) 으로 처리한다
+/** 수신자 상태 테이블 쿼리 전담. 10만 행 단위라 전부 집합 연산(배치 insert, 조건부 UPDATE, 집계) 으로 처리한다. */
 @Injectable()
 export class AlarmRecipientRepository {
   constructor(@InjectRepository(AlarmRecipient) private readonly repo: Repository<AlarmRecipient>) {}
@@ -97,6 +98,7 @@ export class AlarmRecipientRepository {
   /**
    * [claim] PENDING → PROCESSING. 알림이 발송 가능 상태일 때만 성공한다 (취소된 알림은 여기서 걸러진다).
    * 같은 수신자 잡이 두 워커에 동시에 들어와도 UPDATE 는 한 쪽만 성공한다.
+   * leaseUntil 은 점유의 펜스 토큰 역할도 한다 — settle 은 같은 leaseUntil 일 때만 기록한다.
    */
   async claim(alarmId: string, recipientId: string, leaseUntil: Date): Promise<boolean> {
     // TypeORM 의 query() 는 UPDATE 문에 대해 [rows, rowCount] 를 돌려준다 (SELECT 처럼 rows 가 아님). rowCount 로 판정한다
@@ -130,16 +132,35 @@ export class AlarmRecipientRepository {
     return (result.affected ?? 0) === 1;
   }
 
-  // [settle] PROCESSING 인 행만 결과를 기록한다. 그 사이 다른 경로가 바꿨으면 affected 0
-  async settle(alarmId: string, recipientId: string, patch: RecipientSettlePatch): Promise<boolean> {
+  /**
+   * [settle] 내 점유(PROCESSING + 같은 lease_until)인 행만 결과를 기록한다.
+   * lease 가 만료돼 다른 워커가 reclaim 한 뒤라면 affected 0 — 늦게 깨어난 워커가 남의 결과를 덮어쓰지 못한다.
+   */
+  async settle(alarmId: string, recipientId: string, fence: Date, patch: RecipientSettlePatch): Promise<boolean> {
     const result = await this.repo
       .createQueryBuilder()
       .update(AlarmRecipient)
       .set({ ...patch, leaseUntil: null })
-      .where('alarm_id = :alarmId AND recipient_id = :recipientId AND status = :processing', {
+      .where('alarm_id = :alarmId AND recipient_id = :recipientId AND status = :processing AND lease_until = :fence', {
         alarmId,
         recipientId,
         processing: RecipientStatus.PROCESSING,
+        fence,
+      })
+      .execute();
+    return (result.affected ?? 0) === 1;
+  }
+
+  // 알림이 종료된 뒤 뒤늦게 PENDING 으로 돌아온 행(429/5xx 재시도 중 취소 등)을 정리한다
+  async cancelIfPending(alarmId: string, recipientId: string): Promise<boolean> {
+    const result = await this.repo
+      .createQueryBuilder()
+      .update(AlarmRecipient)
+      .set({ status: RecipientStatus.CANCELLED })
+      .where('alarm_id = :alarmId AND recipient_id = :recipientId AND status = :pending', {
+        alarmId,
+        recipientId,
+        pending: RecipientStatus.PENDING,
       })
       .execute();
     return (result.affected ?? 0) === 1;
@@ -147,7 +168,8 @@ export class AlarmRecipientRepository {
 
   /**
    * 복구 대상: lease 만료 PROCESSING, 오래된 UNKNOWN(staleSec), 아주 오래된 PENDING(pendingStaleSec, 잡 유실 의심).
-   * PENDING 은 정상 대기열도 수십 분 머무르므로 기준을 따로 둔다. 알림이 종료되지 않은 것만.
+   * PENDING 은 정상 대기열도 수십 분 머무르므로 기준을 따로 둔다.
+   * 취소된 알림은 결과 확인이 필요한 PROCESSING/UNKNOWN 만 대상이고 PENDING 은 제외한다 (claim 이 거절되므로 재투입해도 의미 없음).
    */
   findRecoverable(staleSec: number, pendingStaleSec: number, limit: number): Promise<RecoverableRecipient[]> {
     return this.repo.query<RecoverableRecipient[]>(
@@ -155,8 +177,8 @@ export class AlarmRecipientRepository {
          FROM alarm_recipients r JOIN alarms a ON a.id = r.alarm_id
         WHERE a.status = ANY($1)
           AND ((r.status = $2 AND r.lease_until < now())
-            OR (r.status = $3 AND r.updated_at < now() - ($5 || ' seconds')::interval)
-            OR (r.status = $4 AND r.updated_at < now() - ($6 || ' seconds')::interval))
+            OR (r.status = $3 AND r.updated_at < now() - make_interval(secs => $5))
+            OR (r.status = $4 AND a.status <> $8 AND r.updated_at < now() - make_interval(secs => $6)))
         ORDER BY r.updated_at ASC
         LIMIT $7`,
       [
@@ -164,16 +186,17 @@ export class AlarmRecipientRepository {
         RecipientStatus.PROCESSING,
         RecipientStatus.UNKNOWN,
         RecipientStatus.PENDING,
-        String(staleSec),
-        String(pendingStaleSec),
+        staleSec,
+        pendingStaleSec,
         limit,
+        AlarmStatus.CANCELLED,
       ],
     );
   }
 
   // 알림 취소 시 아직 손대지 않은 수신자만 일괄 취소. PROCESSING(호출 중) 은 결과대로 남긴다
-  async cancelPending(alarmId: string): Promise<number> {
-    const result = await this.repo
+  async cancelPending(alarmId: string, manager?: EntityManager): Promise<number> {
+    const result = await (manager ?? this.repo.manager)
       .createQueryBuilder()
       .update(AlarmRecipient)
       .set({ status: RecipientStatus.CANCELLED })

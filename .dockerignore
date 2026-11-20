@@ -10,3 +10,7 @@ docs/private
 .agents
 .idea
 *.md
+test
+docs
+scripts
+docker

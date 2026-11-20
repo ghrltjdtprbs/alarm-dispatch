@@ -20,7 +20,12 @@ export async function runConcurrently(
   // 1. 출발 신호 전까지 모든 작업을 대기시킨다
   let release!: () => void;
   const gate = new Promise<void>((resolve) => (release = resolve));
-  const settled = Promise.allSettled(Array.from({ length: taskCount }, (_, i) => gate.then(() => task(i))));
+  const settled = Promise.allSettled(
+    Array.from({ length: taskCount }, async (_, i) => {
+      await gate;
+      return task(i);
+    }),
+  );
 
   // 2. 동시 출발 후 결과 집계 (교착 시 무한 대기하지 않도록 상한)
   release();

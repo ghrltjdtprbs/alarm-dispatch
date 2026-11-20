@@ -1,17 +1,10 @@
 import { Controller, Get } from '@nestjs/common';
-import { ApiOperation, ApiProperty, ApiTags } from '@nestjs/swagger';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
+
 import { ApiOkResponseDTO } from '../swagger/api-response.decorator';
+import { HealthResponse } from './health.response';
 
-export class HealthResponse {
-  @ApiProperty({ description: '서버 상태', example: 'ok', required: true })
-  status: 'ok';
-
-  constructor() {
-    this.status = 'ok';
-  }
-}
-
-// 컨테이너/로드밸런서 헬스체크용. 버전 prefix 예외 (docs/conventions/api.md §1)
+/** 컨테이너/로드밸런서 헬스체크용. 버전 prefix 예외 (docs/conventions/api.md §1). */
 @ApiTags('Health')
 @Controller('health')
 export class HealthController {

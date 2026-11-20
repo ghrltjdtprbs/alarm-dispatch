@@ -1,6 +1,7 @@
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { OptimisticLockVersionMismatchError, QueryFailedError } from 'typeorm';
+
 import { ResponseDTO } from '../dto/response.dto';
 import { ApplicationException, QuietApplicationException } from './application.exception';
 import { ErrorCode } from './error-code';
@@ -37,6 +38,11 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       return this.fromHttpException(exception);
     }
 
+    // 2-1. body-parser 가 던지는 JSON 파싱 오류 (HttpException 이 아님). 클라이언트 잘못이므로 400
+    if (GlobalExceptionFilter.isBodyParseError(exception)) {
+      return ResponseDTO.error(ErrorCode.VALIDATION_FAILED, '요청 본문을 JSON 으로 해석할 수 없습니다.');
+    }
+
     // 3. TypeORM — 유니크 제약 위반은 409, 낙관적 락 충돌은 409
     if (
       exception instanceof QueryFailedError &&
@@ -50,6 +56,11 @@ export class GlobalExceptionFilter implements ExceptionFilter {
 
     // 4. 그 외 — 내부 정보 노출 금지, 고정 메시지
     return ResponseDTO.error(ErrorCode.INTERNAL_SERVER_ERROR);
+  }
+
+  private static isBodyParseError(exception: unknown): boolean {
+    const e = exception as { type?: unknown; status?: unknown } | null;
+    return !!e && typeof e === 'object' && (e.type === 'entity.parse.failed' || e.status === HttpStatus.BAD_REQUEST);
   }
 
   private fromHttpException(exception: HttpException): ResponseDTO<null> {

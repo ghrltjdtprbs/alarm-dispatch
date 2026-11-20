@@ -1,6 +1,7 @@
 // @ts-check
 import eslint from '@eslint/js';
 import eslintPluginPrettierRecommended from 'eslint-plugin-prettier/recommended';
+import simpleImportSort from 'eslint-plugin-simple-import-sort';
 import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
@@ -25,12 +26,14 @@ export default tseslint.config(
     },
   },
   {
+    plugins: { 'simple-import-sort': simpleImportSort },
     rules: {
+      // import 순서: 패키지(알파벳) → 상대 경로. docs/conventions/module.md §5
+      'simple-import-sort/imports': ['error', { groups: [['^node:', '^@?\\w'], ['^\\.']] }],
+      'simple-import-sort/exports': 'error',
       '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-floating-promises': 'warn',
       '@typescript-eslint/no-unsafe-argument': 'warn',
-      // import 중괄호 안 멤버 순서만 고정한다 (선언 순서는 docs/conventions/module.md §5 를 따른다)
-      'sort-imports': ['error', { ignoreDeclarationSort: true, ignoreCase: true }],
     },
   },
 );

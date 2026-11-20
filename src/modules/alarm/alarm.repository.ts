@@ -1,9 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
+
+import { Alarm } from './alarm.entity';
 import { AlarmStatus } from './alarm-status.enum';
 import { AlarmType } from './alarm-type.enum';
-import { Alarm } from './alarm.entity';
 
 export interface AlarmPageFilter {
   status?: AlarmStatus;
@@ -12,7 +13,7 @@ export interface AlarmPageFilter {
   limit: number;
 }
 
-// 알림 테이블 쿼리 전담. 상태 변경은 전부 조건부 UPDATE 라 "읽고 판단하고 쓰는" 경합이 없다
+/** 알림 테이블 쿼리 전담. 상태 변경은 전부 조건부 UPDATE 라 "읽고 판단하고 쓰는" 경합이 없다. */
 @Injectable()
 export class AlarmRepository {
   constructor(@InjectRepository(Alarm) private readonly repo: Repository<Alarm>) {}
@@ -37,7 +38,7 @@ export class AlarmRepository {
     return this.repo
       .createQueryBuilder('a')
       .where('a.status = :status', { status })
-      .andWhere("a.updated_at < now() - (:staleSec || ' seconds')::interval", { staleSec: String(staleSec) })
+      .andWhere('a.updated_at < now() - make_interval(secs => :staleSec)', { staleSec })
       .orderBy('a.updatedAt', 'ASC')
       .limit(limit)
       .getMany();
@@ -45,10 +46,15 @@ export class AlarmRepository {
 
   /**
    * 조건부 상태 전이. from 에 있는 상태일 때만 to 로 바꾸고 성공 여부를 돌려준다.
-   * 같은 알림에 동시 요청이 와도 DB 가 한 건만 성공시키므로 별도 락이 필요 없다.
+   * 같은 알림에 동시 요청이 와도 DB 가 한 건만 성공시키므로 별도 락이 필요 없다. manager 를 넘기면 호출자 트랜잭션 안에서 실행된다.
    */
-  async transition(id: string, from: readonly AlarmStatus[], to: AlarmStatus): Promise<boolean> {
-    const result = await this.repo
+  async transition(
+    id: string,
+    from: readonly AlarmStatus[],
+    to: AlarmStatus,
+    manager?: EntityManager,
+  ): Promise<boolean> {
+    const result = await (manager ?? this.repo.manager)
       .createQueryBuilder()
       .update(Alarm)
       .set({ status: to })

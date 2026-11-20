@@ -13,7 +13,7 @@
 | GET | `/health` | - | `200 {"ok":true}` | compose healthcheck 용 |
 | GET | `/v1/users?limit=&cursor=` | `limit` 1~1000 (기본 100), `cursor` 는 이전 응답의 `nextCursor` | `200 {"users":[{"id":"u_000001","name":"...","phone":"010-...."}],"nextCursor":"MTAx"}` | 커서 페이징. 마지막 페이지는 `nextCursor: null`. `cursor` 가 잘못되면 `400 INVALID_CURSOR`. `id` 는 `u_000001`~`u_100000`. 단건 조회(`/v1/users/{id}`)는 없음(404) |
 | POST | `/v1/messages` | `{"alarmId": string, "recipientId": string, "body": string, "clientRef"?: string, "title"?: string}` | `202 {"messageId":"m_1"}` | `alarmId`/`recipientId`/`body` 필수(없으면 `400 INVALID_REQUEST`). `title` 은 보내도 무시되지 않고 받아들여짐(필수 아님) |
-| GET | `/v1/messages?clientRef=` | `clientRef` 필수 | `200 {"messages":[{"messageId":"m_1","recipientId":"u_000001","sentAt":"ISO"}]}` | **같은 clientRef 로 처리된 발송 이력 조회**. 없으면 `messages: []`. 타임아웃 뒤 "실제로 보내졌는지" 확인하는 용도로 쓴다 |
+| GET | `/v1/messages?clientRef=` | `clientRef` 필수, **URL 인코딩 필수** (`:` 를 그대로 보내면 빈 결과) | `200 {"messages":[{"messageId":"m_1","recipientId":"u_000001","sentAt":"ISO"}]}` | **같은 clientRef 로 처리된 발송 이력 조회**. 없으면 `messages: []`. 타임아웃 뒤 "실제로 보내졌는지" 확인하는 용도. 타임아웃(30초 무응답) 요청도 **수신 즉시** 기록된다 (실측: +5초에 조회됨) |
 
 ### 발송 오류 응답
 

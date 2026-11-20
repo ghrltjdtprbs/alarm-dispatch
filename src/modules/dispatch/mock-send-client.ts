@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+
 import { Configuration } from '../../common/config/configuration';
 import { SendClient, SendMessageRequest, SendResult, UserPage } from './send-client';
 
@@ -8,7 +9,10 @@ interface ErrorBody {
   message?: string;
 }
 
-// 과제 제공 mock 서버 HTTP 클라이언트 (docs/mock-api.md). Node 22 내장 fetch + AbortSignal.timeout
+// Retry-After 헤더가 없거나 이상할 때 쓰는 대기 시간
+const DEFAULT_RETRY_AFTER_SEC = 1;
+
+/** 과제 제공 mock 서버 HTTP 클라이언트 (docs/mock-api.md). Node 내장 fetch + AbortSignal.timeout. */
 @Injectable()
 export class MockSendClient implements SendClient {
   private readonly logger = new Logger(MockSendClient.name);
@@ -31,20 +35,17 @@ export class MockSendClient implements SendClient {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (error) {
-      // AbortSignal.timeout 은 TimeoutError 로 reject 된다. 그 외는 DNS/연결 오류
+      // AbortSignal.timeout 은 TimeoutError 로 reject 된다. 그 외는 DNS/연결 오류 — undici 는 원인 코드를 cause.code 에 둔다
       if (error instanceof Error && error.name === 'TimeoutError') return { kind: 'timeout' };
-      return { kind: 'network', code: error instanceof Error ? error.name : 'UNKNOWN' };
+      return { kind: 'network', code: MockSendClient.networkErrorCode(error) };
     }
 
-    if (res.status === 202 || res.status === 200) {
+    if (res.ok) {
       const body = (await res.json()) as { messageId: string };
       return { kind: 'sent', messageId: body.messageId };
     }
     const code = await this.readErrorCode(res);
-    if (res.status === 429) {
-      const retryAfterSec = Number(res.headers.get('retry-after') ?? '1');
-      return { kind: 'rate_limited', retryAfterMs: (Number.isFinite(retryAfterSec) ? retryAfterSec : 1) * 1000 };
-    }
+    if (res.status === 429) return { kind: 'rate_limited', retryAfterMs: MockSendClient.retryAfterMs(res) };
     if (res.status >= 500) return { kind: 'temporary', code };
     if (res.status >= 400) return { kind: 'permanent', code };
     this.logger.warn(`[mock 예상 밖 응답] status=${res.status} code=${code}`);
@@ -68,6 +69,18 @@ export class MockSendClient implements SendClient {
     if (!res.ok) throw new Error(`사용자 목록 조회 실패 status=${res.status}`);
     const body = (await res.json()) as { users: { id: string }[]; nextCursor: string | null };
     return { ids: body.users.map((u) => u.id), nextCursor: body.nextCursor };
+  }
+
+  // Retry-After 는 초 단위 정수. 없거나 0 이하·숫자가 아니면 기본값
+  static retryAfterMs(res: Response): number {
+    const sec = Number(res.headers.get('retry-after'));
+    return (Number.isFinite(sec) && sec > 0 ? sec : DEFAULT_RETRY_AFTER_SEC) * 1000;
+  }
+
+  static networkErrorCode(error: unknown): string {
+    const cause = (error as { cause?: { code?: unknown } } | null)?.cause;
+    if (cause && typeof cause.code === 'string') return cause.code;
+    return error instanceof Error ? error.name : 'UNKNOWN';
   }
 
   private async readErrorCode(res: Response): Promise<string> {

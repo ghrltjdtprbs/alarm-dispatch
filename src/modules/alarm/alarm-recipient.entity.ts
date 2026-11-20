@@ -1,4 +1,5 @@
 import { Column, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, Unique } from 'typeorm';
+
 import { BaseEntity } from '../../common/entity/base.entity';
 import { Alarm } from './alarm.entity';
 import { RecipientStatus } from './recipient-status.enum';

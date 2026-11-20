@@ -1,5 +1,31 @@
 # docker compose up 한 번으로 전체 실행. 워커 다중화: docker compose up --scale worker=3
-# 값은 .env 에서 읽는다 (cp .env.sample .env)
+# 값은 .env 에서 읽되(cp .env.sample .env) 없어도 기본값으로 뜬다
+x-app-env: &app-env
+  NODE_ENV: production
+  DB_HOST: postgres
+  DB_PORT: 5432
+  DB_USERNAME: ${DB_USERNAME:-alarm}
+  DB_PASSWORD: ${DB_PASSWORD:-alarm}
+  DB_NAME: ${DB_NAME:-alarm}
+  DB_SYNCHRONIZE: "false"
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  MOCK_API_BASE_URL: http://mock:4000
+  SEND_RATE_LIMIT_PER_SEC: ${SEND_RATE_LIMIT_PER_SEC:-45}
+  SEND_REQUEST_TIMEOUT_MS: ${SEND_REQUEST_TIMEOUT_MS:-5000}
+  SEND_MAX_ATTEMPTS: ${SEND_MAX_ATTEMPTS:-5}
+  SEND_RECONCILE_DELAY_MS: ${SEND_RECONCILE_DELAY_MS:-5000}
+  SEND_LEASE_SEC: ${SEND_LEASE_SEC:-60}
+  WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-25}
+  RECOVERY_SWEEP_INTERVAL_MS: ${RECOVERY_SWEEP_INTERVAL_MS:-60000}
+
+# 이미지에 curl/wget 이 없을 수 있어 node fetch 로 헬스체크
+x-node-healthcheck: &node-healthcheck
+  interval: 5s
+  timeout: 10s
+  retries: 10
+  start_period: 30s
+
 services:
   api:
     build: .
@@ -7,56 +33,27 @@ services:
     ports:
       - "${API_PORT:-3000}:3000"
     environment:
-      NODE_ENV: production
+      <<: *app-env
       API_PORT: 3000
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_USERNAME: ${DB_USERNAME}
-      DB_PASSWORD: ${DB_PASSWORD}
-      DB_NAME: ${DB_NAME}
-      DB_SYNCHRONIZE: "false"
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      MOCK_API_BASE_URL: http://mock:4000
-      SEND_RATE_LIMIT_PER_SEC: ${SEND_RATE_LIMIT_PER_SEC:-45}
-      SEND_REQUEST_TIMEOUT_MS: ${SEND_REQUEST_TIMEOUT_MS:-5000}
-      SEND_MAX_ATTEMPTS: ${SEND_MAX_ATTEMPTS:-5}
-      SEND_LEASE_SEC: ${SEND_LEASE_SEC:-60}
-      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-25}
-      RECOVERY_SWEEP_INTERVAL_MS: ${RECOVERY_SWEEP_INTERVAL_MS:-60000}
+      # 마이그레이션은 api 한 프로세스만 적용한다 (워커 다중화 시 경합 방지)
+      RUN_MIGRATIONS: "true"
+    healthcheck:
+      <<: *node-healthcheck
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
     depends_on:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      mock:
         condition: service_healthy
     restart: unless-stopped
 
   worker:
     build: .
     command: ["node", "dist/worker"]
-    environment:
-      NODE_ENV: production
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_USERNAME: ${DB_USERNAME}
-      DB_PASSWORD: ${DB_PASSWORD}
-      DB_NAME: ${DB_NAME}
-      DB_SYNCHRONIZE: "false"
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      MOCK_API_BASE_URL: http://mock:4000
-      SEND_RATE_LIMIT_PER_SEC: ${SEND_RATE_LIMIT_PER_SEC:-45}
-      SEND_REQUEST_TIMEOUT_MS: ${SEND_REQUEST_TIMEOUT_MS:-5000}
-      SEND_MAX_ATTEMPTS: ${SEND_MAX_ATTEMPTS:-5}
-      SEND_LEASE_SEC: ${SEND_LEASE_SEC:-60}
-      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-25}
-      RECOVERY_SWEEP_INTERVAL_MS: ${RECOVERY_SWEEP_INTERVAL_MS:-60000}
+    environment: *app-env
+    # api 가 healthy = 마이그레이션 완료 → 그 뒤에 워커를 띄운다
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
+      api:
         condition: service_healthy
       mock:
         condition: service_healthy
@@ -68,26 +65,22 @@ services:
     ports:
       - "${MOCK_API_PORT:-4000}:4000"
     healthcheck:
-      # 이미지에 curl/wget 이 없을 수 있어 node fetch 로 확인
+      <<: *node-healthcheck
       test: ["CMD", "node", "-e", "fetch('http://localhost:4000/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
-      interval: 5s
-      timeout: 10s
-      retries: 10
-      start_period: 30s
 
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: ${DB_USERNAME}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USERNAME:-alarm}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-alarm}
+      POSTGRES_DB: ${DB_NAME:-alarm}
     ports:
       - "${DB_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d ${DB_NAME}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-alarm} -d ${DB_NAME:-alarm}"]
       interval: 5s
       timeout: 5s
       retries: 10

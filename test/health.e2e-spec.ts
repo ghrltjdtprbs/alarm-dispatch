@@ -1,4 +1,5 @@
 import * as request from 'supertest';
+
 import { ResponseDTO } from '../src/common/dto/response.dto';
 import { createTestApp, TestContext } from './support/integration-test.support';
 
@@ -30,7 +31,7 @@ describe('공통 응답 형식 (e2e)', () => {
     expect((ctx.dataSource.options as { database?: string }).database).toBe('alarm_test');
   });
 
-  it('truncateAll 은 등록된 엔티티가 없어도 실패하지 않는다', async () => {
+  it('truncateAll 은 등록된 엔티티 테이블을 비우고 실패하지 않는다', async () => {
     await expect(ctx.truncateAll()).resolves.toBeUndefined();
   });
 });
