@@ -34,3 +34,13 @@ export function prepareJobId(alarmId: string): string {
 export function sendJobId(alarmId: string, recipientId: string): string {
   return `send-${alarmId}-${recipientId}`;
 }
+
+/**
+ * 재시도·결과 확인으로 지연됐다 돌아오는 잡의 우선순위. BullMQ 는 지연에서 복귀한 잡을 같은 우선순위 뒤로 보내므로
+ * 대량 발송 10만 건 뒤에서 기다리게 된다. 대량 잡은 prepare 와 같은 5 로 올려 복귀 즉시 처리하되 긴급(1~2) 은 앞지르지 않는다.
+ */
+export function retryPriority(current: number | undefined): number {
+  if (current === undefined || current >= JOB_PRIORITY[AlarmType.BULK].send)
+    return JOB_PRIORITY[AlarmType.BULK].prepare;
+  return current;
+}

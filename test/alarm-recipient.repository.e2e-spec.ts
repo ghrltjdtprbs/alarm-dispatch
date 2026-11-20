@@ -92,7 +92,7 @@ describe('AlarmRecipientRepository (e2e)', () => {
        WHERE alarm_id = $3`,
       [past(), future(), alarm.id],
     );
-    const found = (await recipients.findRecoverable(120, 100)).map((r) => r.recipientId).sort();
+    const found = (await recipients.findRecoverable(120, 3600, 100)).map((r) => r.recipientId).sort();
     expect(found).toEqual(['u_dead', 'u_old_unknown']);
   });
 

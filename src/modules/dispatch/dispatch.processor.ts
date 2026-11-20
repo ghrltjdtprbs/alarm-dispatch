@@ -3,7 +3,7 @@ import { Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DelayedError, Job, Queue, Worker } from 'bullmq';
 import { Configuration } from '../../common/config/configuration';
-import { DISPATCH_QUEUE, DispatchJobName, PrepareJobData, SendJobData } from './dispatch-job';
+import { DISPATCH_QUEUE, DispatchJobName, PrepareJobData, retryPriority, SendJobData } from './dispatch-job';
 import { PrepareService } from './prepare.service';
 import { SendService } from './send.service';
 
@@ -50,10 +50,14 @@ export class DispatchProcessor extends WorkerHost implements OnModuleInit {
         // 정상 발송(sent) 은 10만 건이라 남기지 않는다. 그 외 종료 사유만 기록
         if (outcome.reason !== 'sent') this.logger.log(`[send 종료] id=${job.id} reason=${outcome.reason}`);
         return;
-      case 'retry':
-        // 시도 횟수를 소모하지 않고 지정 시간 뒤 다시 처리한다 (BullMQ 공식 패턴: moveToDelayed + DelayedError)
+      case 'retry': {
+        // 시도 횟수를 소모하지 않고 지정 시간 뒤 다시 처리한다 (BullMQ 공식 패턴: moveToDelayed + DelayedError).
+        // 복귀 시 대량 잡 뒤에 줄 서지 않도록 우선순위를 먼저 올린다 (active 잡은 해시 값만 바뀌고 승격 때 반영된다)
+        const priority = retryPriority(job.opts.priority);
+        if (priority !== job.opts.priority) await job.changePriority({ priority });
         await job.moveToDelayed(Date.now() + outcome.delayMs, token);
         throw new DelayedError();
+      }
       case 'rate_limited':
         // 큐 전체(모든 워커) 를 Retry-After 만큼 멈춘다. 잡은 시도 차감 없이 대기열로 돌아간다
         await this.queue.rateLimit(outcome.retryAfterMs);

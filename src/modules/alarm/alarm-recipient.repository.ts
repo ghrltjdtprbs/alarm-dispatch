@@ -146,24 +146,26 @@ export class AlarmRecipientRepository {
   }
 
   /**
-   * 복구 대상: lease 만료 PROCESSING, 오래된 UNKNOWN, 오래된 PENDING(잡 유실). 알림이 종료되지 않은 것만.
-   * 재투입은 jobId 가 결정적이라 이미 큐에 있으면 무시된다
+   * 복구 대상: lease 만료 PROCESSING, 오래된 UNKNOWN(staleSec), 아주 오래된 PENDING(pendingStaleSec, 잡 유실 의심).
+   * PENDING 은 정상 대기열도 수십 분 머무르므로 기준을 따로 둔다. 알림이 종료되지 않은 것만.
    */
-  findRecoverable(staleSec: number, limit: number): Promise<RecoverableRecipient[]> {
+  findRecoverable(staleSec: number, pendingStaleSec: number, limit: number): Promise<RecoverableRecipient[]> {
     return this.repo.query<RecoverableRecipient[]>(
       `SELECT r.alarm_id AS "alarmId", r.recipient_id AS "recipientId", a.type AS type
          FROM alarm_recipients r JOIN alarms a ON a.id = r.alarm_id
         WHERE a.status = ANY($1)
           AND ((r.status = $2 AND r.lease_until < now())
-            OR (r.status IN ($3, $4) AND r.updated_at < now() - ($5 || ' seconds')::interval))
+            OR (r.status = $3 AND r.updated_at < now() - ($5 || ' seconds')::interval)
+            OR (r.status = $4 AND r.updated_at < now() - ($6 || ' seconds')::interval))
         ORDER BY r.updated_at ASC
-        LIMIT $6`,
+        LIMIT $7`,
       [
         [...SENDABLE_ALARM_STATUSES, AlarmStatus.CANCELLED],
         RecipientStatus.PROCESSING,
         RecipientStatus.UNKNOWN,
         RecipientStatus.PENDING,
         String(staleSec),
+        String(pendingStaleSec),
         limit,
       ],
     );
