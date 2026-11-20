@@ -23,7 +23,7 @@
 | 400 | `UNKNOWN_RECIPIENT` | 존재하지 않는 수신자 | 영구 실패 |
 | 400 | `RECIPIENT_BLOCKED` | 수신 거부(opted out) 사용자, 항상 400 (999명, 예: `u_000089`) | 영구 실패. 재시도 금지 |
 | 429 | `RATE_LIMITED` | 초당 50건 초과. 헤더 `retry-after: 1` (초) | 전역 일시정지 후 재시도. 실패 카운트에 넣지 않음 |
-| 500 | `INTERNAL_ERROR` | 일시 오류 ("temporary failure") | 백오프 재시도 |
+| 500 | `INTERNAL_ERROR` | 일시 오류 ("temporary failure"). **메시지는 기록되지 않음** (실측 12건 중 0건) → 재시도해도 중복 없음 | 백오프 재시도 |
 | 503 | `SERVICE_UNAVAILABLE` | 일시 오류 | 백오프 재시도 |
 | (무응답) | - | 약 2%: **발송은 처리됨**, 30초 뒤에도 응답 없음 | 타임아웃으로 끊고 `GET /v1/messages?clientRef=` 로 처리 여부 확인 후 재시도 여부 결정 |
 
