@@ -1,0 +1,36 @@
+### Node / NestJS ###
+node_modules/
+dist/
+coverage/
+*.log
+npm-debug.log*
+.npm
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+out/
+
+### VS Code ###
+.vscode/
+
+### Env ###
+.env
+.env.*
+!.env.sample
+!.env.test
+.DS_Store
+
+### 과제 원문 등 비공개 자료 (Public 레포 제출이므로 절대 커밋 금지) ###
+docs/private/
+
+### AI 하네스 — 전부 커밋 금지 (제출 레포에는 코드·README·설계 문서만) ###
+CLAUDE.md
+AGENTS.md
+.claude/
+.codex/
+.agents/
+docs/conventions/
+docs/coding-test-playbook.md
