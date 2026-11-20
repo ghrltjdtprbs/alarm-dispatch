@@ -103,6 +103,15 @@ describe('AlarmRecipientRepository (e2e)', () => {
     expect(found).toEqual(['u_dead', 'u_old_unknown']);
   });
 
+  it('종료된 알림에 남은 PENDING 은 cancelPendingOfFinishedAlarms 가 일괄 정리한다 (진행 중 알림은 건드리지 않음)', async () => {
+    const cancelled = await createAlarm(AlarmStatus.CANCELLED, ['u_1', 'u_2']);
+    const sending = await createAlarm(AlarmStatus.SENDING, ['u_3']);
+    expect(await recipients.cancelPendingOfFinishedAlarms()).toBe(2);
+    expect((await recipients.countByStatus(cancelled.id))[RecipientStatus.CANCELLED]).toBe(2);
+    expect((await recipients.countByStatus(sending.id))[RecipientStatus.PENDING]).toBe(1);
+    expect(await recipients.cancelPendingOfFinishedAlarms()).toBe(0);
+  });
+
   it('취소된 알림은 결과 확인이 필요한 PROCESSING/UNKNOWN 만 복구 대상이고 PENDING 은 제외한다', async () => {
     const alarm = await createAlarm(AlarmStatus.CANCELLED, ['u_pending', 'u_unknown']);
     await ctx.dataSource.query(

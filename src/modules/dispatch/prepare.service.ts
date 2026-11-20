@@ -34,7 +34,12 @@ export class PrepareService {
   async handle(data: PrepareJobData): Promise<void> {
     const alarm = await this.alarmRepository.findById(data.alarmId);
     if (!alarm || alarm.status !== AlarmStatus.PREPARING) {
-      this.logger.warn(`[prepare 건너뜀] alarmId=${data.alarmId} status=${alarm?.status ?? 'missing'}`);
+      // 재전달된 prepare 잡. 그 사이 취소됐다면 먼저 돌던 실행이 적재만 하고 죽었을 수 있으므로 PENDING 잔여를 정리한다
+      const cancelled =
+        alarm?.status === AlarmStatus.CANCELLED ? await this.recipientRepository.cancelPending(alarm.id) : 0;
+      this.logger.warn(
+        `[prepare 건너뜀] alarmId=${data.alarmId} status=${alarm?.status ?? 'missing'} cancelledPending=${cancelled}`,
+      );
       return;
     }
 

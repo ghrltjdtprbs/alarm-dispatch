@@ -182,7 +182,7 @@ API   POST /alarms/:id/send ── CREATED→PREPARING (조건부 UPDATE) ──
 | 발송 시작 동시 N회 | `UPDATE alarms SET status='PREPARING' WHERE id=? AND status='CREATED'` → affected 1 인 요청만 큐 투입, 나머지 409 | 읽고-판단하고-쓰는 흐름이 없으니 락·버전 컬럼 없이 DB 가 경합을 끝냄 |
 | 시작 vs 취소 경합 | 둘 다 조건부 UPDATE. 취소는 PREPARING/SENDING 에서도 허용 | 취소가 늦게 와도 워커가 claim 때 알림 상태를 다시 확인하므로 추가 발송 없음 |
 | 워커 간 중복 claim | BullMQ 잡 lock(1차) + 수신자 행 조건부 UPDATE(2차) + lease 펜스(3차) | stalled 로 잡이 두 번 전달돼도 행 상태가 PROCESSING/SENT 면 보내지 않음. 멈췄다 늦게 깨어난 워커는 lease 가 바뀌어 있어 보내지도 기록하지도 못함 |
-| 취소 vs 진행 중 발송 | 취소는 알림 전이 + PENDING 일괄 CANCELLED 를 한 트랜잭션으로. 호출 중(PROCESSING) 건은 결과대로 기록, 큐에 남은 잡은 claim 실패로 no-op (토큰 미소모). 429/5xx 로 뒤늦게 PENDING 으로 돌아온 행은 다음 실행이 CANCELLED 로 정리 | 이미 외부로 나간 발송은 되돌릴 수 없음 |
+| 취소 vs 진행 중 발송 | 취소는 알림 전이 + PENDING 일괄 CANCELLED 를 한 트랜잭션으로. 호출 중(PROCESSING) 건은 결과대로 기록, 큐에 남은 잡은 claim 실패로 no-op (토큰 미소모). 429/5xx 로 뒤늦게 PENDING 으로 돌아온 행은 다음 실행이, 취소 직후 적재만 되고 잡이 없는 행은 복구 스윕이 CANCELLED 로 정리 | 이미 외부로 나간 발송은 되돌릴 수 없음 |
 | 타임아웃 중복 방지 | UNKNOWN 으로 두고 clientRef 조회 후에만 재발송 | 무조건 재전송하면 2% 가 중복, 무조건 실패 처리하면 누락 |
 | 워커 사망 (kill -9) | BullMQ stalled 감지(15초)로 잡 재전달 → 행이 PROCESSING + lease 만료 → 결과 확인 경로. 2차로 주기 스윕이 lease 만료·오래된 UNKNOWN 을 재투입 | 실측: 발송 중 kill -9 → PROCESSING 고아 10건 → 60초 내 전부 복구, 중복 0 |
 | 큐 유실 / 잡 영구 실패 | 스윕이 DB 기준으로 재투입. 큐에 아직 있는 잡은 우선순위만 올리고, 실패로 남은 잡은 지우고 새로 넣음 (실패 잡은 보관하지 않아 같은 jobId 재투입이 막히지 않음) | 상태의 진실이 DB 라 Redis 가 비워져도 이어서 발송 가능 |
@@ -206,10 +206,10 @@ API   POST /alarms/:id/send ── CREATED→PREPARING (조건부 UPDATE) ──
 
 | 종류 | 위치 | 검증 내용 |
 | --- | --- | --- |
-| 단위 (51) | `src/**/*.spec.ts` | 상태 전이 표, 응답 래퍼·예외 필터, 우선순위, **발송 분기 전부**(2xx/400/429/5xx 상한/연결 거부/소켓 끊김/타임아웃/lease 만료/펜스 불일치/결과 확인 4가지), mock 클라이언트 응답 매핑(fetch 스텁), prepare(커서 순회·취소 중단·재시도) 를 fake 로 인프라 없이 |
+| 단위 (52) | `src/**/*.spec.ts` | 상태 전이 표, 응답 래퍼·예외 필터, 우선순위, **발송 분기 전부**(2xx/400/429/5xx 상한/연결 거부/소켓 끊김/타임아웃/lease 만료/펜스 불일치/결과 확인 4가지), mock 클라이언트 응답 매핑(fetch 스텁), prepare(커서 순회·취소 중단·재시도) 를 fake 로 인프라 없이 |
 | e2e API (27) | `test/alarm.e2e-spec.ts`, `test/health.e2e-spec.ts` | 생성·검증 실패(수신자 101명, 빈 id, 공백 제목, 잘못된 JSON 본문 → 400)·목록·단건·수신자 목록 필터, 발송 시작 **동시 10회 → 1건 202·9건 409·잡 1개**, 시작/취소 경합, 취소 후 수신자 상태 |
-| e2e 리포지토리 (8) | `test/alarm-recipient.repository.e2e-spec.ts` | 실제 PostgreSQL 에서 claim 동시 8회 → 1건 성공, 취소된 알림 claim 거부, settle 은 내 펜스로만, reclaim 은 lease 만료만, 복구 대상 선별(취소된 알림의 PENDING 제외), 적재 재실행 중복 없음 |
-| 수동 시나리오 | compose 기동 | 10만 명 발송 처리량·429 여부, 발송 중 워커 kill -9 복구, 발송 중 취소, 긴급 알림 끼어들기 |
+| e2e 리포지토리 (9) | `test/alarm-recipient.repository.e2e-spec.ts` | 실제 PostgreSQL 에서 claim 동시 8회 → 1건 성공, 취소된 알림 claim 거부, settle 은 내 펜스로만, reclaim 은 lease 만료만, 복구 대상 선별(취소된 알림의 PENDING 제외), 적재 재실행 중복 없음 |
+| 수동 시나리오 | 로컬·compose 기동 | 10만 명 발송 완료(sent 99,001 + 차단 999, 미확정 0), 처리량 약 40 rps·429 0건, 발송 중 워커 kill -9 복구, 발송 중 취소, 긴급 알림 끼어들기(대량 진행 중 20명 9초), 현재 코드로 보낸 500명 clientRef 전수 감사 중복 0. compose `--scale worker=3` 에서 api 단독 마이그레이션·3 워커 기동·분배·워커 kill 뒤 16건 복구·취소 확인 |
 
 e2e 는 `.env.test` 의 `alarm_test` DB 와 별도 BullMQ 키 prefix 를 써서 로컬에서 돌고 있는 큐·데이터를 건드리지 않습니다. 테스트 DB 이름이 `_test` 로 끝나지 않으면 기동 자체를 거부합니다.
 
@@ -235,6 +235,7 @@ e2e 는 `.env.test` 의 `alarm_test` DB 와 별도 BullMQ 키 prefix 를 써서 
 - **동시성 10 → 25**: mock 응답의 5% 가 3초, 2% 가 5초 타임아웃이라 평균 점유가 약 0.35초였고, 10 슬롯으로는 20~25 rps 에 그쳤습니다. 25 로 올려 약 40 rps 를 냅니다.
 - **되돌린 결정 3 — 429 전역 정지와 종료 순서**: 처음엔 BullMQ `queue.rateLimit()` 으로 모든 워커를 멈추려 했지만, worker 에 `limiter` 옵션이 없으면 무시된다는 것을 BullMQ Lua 소스에서 확인하고 토큰 버킷의 `pause_until` 로 바꿨습니다. 또 토큰 버킷 Redis 연결을 `onModuleDestroy` 에서 닫았더니 SIGTERM 때 진행 중 잡 8건이 "Connection is closed" 로 실패하는 것을 발견해, 워커를 먼저 닫고 연결은 `onApplicationShutdown` 에서 닫도록 순서를 바꿨습니다.
 - **되돌린 결정 4 — settle 펜스와 네트워크 오류**: 10만 건 발송 뒤 재시도·타임아웃을 겪은 수신자 5,630명을 clientRef 로 감사해 중복 24건을 찾았습니다. 전부 워커를 여러 대 띄우고 재기동하던 4분 구간에, 소켓이 끊겨 "네트워크 오류" 로 분류된 뒤 무조건 재시도된 건이었습니다(서버는 첫 요청을 이미 처리). 5xx 는 mock 이 기록하지 않음을 실험으로 확인해 재시도를 유지하고, 연결 거부가 아닌 네트워크 오류는 타임아웃처럼 조회로 확정하도록 바꿨습니다. 또 수신자 1명이 17ms 간격으로 두 번 발송된 것을 clientRef 조회로 발견했습니다. 멈췄다 늦게 깨어난 실행이 다른 워커의 재점유 뒤에 보내고 기록까지 덮어쓸 수 있어, claim 때 받은 lease 를 펜스로 삼아 settle 을 `lease_until = 내 펜스` 로 제한하고 토큰을 기다린 뒤 lease 가 거의 끝났으면 보내지 않도록 했습니다.
+- **compose 검증 환경의 한계**: 제출 전 검증은 Apple Silicon 위 colima(x86 에뮬레이션, 2 vCPU) 에서 했습니다. api·worker 3대·postgres·redis·mock 을 모두 에뮬레이션하니 부하가 50을 넘어 처리량이 초당 수 건으로 떨어졌고, 10만 명 완주는 네이티브 Node + Docker mock 조합으로 확인했습니다. 네이티브 환경에서는 10만 명 적재 약 50초, 발송 약 40분입니다.
 - **더 하고 싶은 것**: 알림별 처리량 지표(발송 속도·실패율) 노출, 워커 상태 헬스 엔드포인트(큐 깊이·stalled 수), 긴급 알림 전용 SLA 측정, 취소된 알림의 큐 잔여 잡 즉시 제거(현재는 no-op 로 빠르게 소진), 마이그레이션 기반 schema 변경 테스트.
 
 ## AI 활용 방식

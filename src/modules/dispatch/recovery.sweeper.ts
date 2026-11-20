@@ -60,7 +60,10 @@ export class RecoverySweeper implements OnModuleInit, OnModuleDestroy {
     try {
       const alarms = await this.recoverOrphanAlarms();
       const recipients = await this.recoverOrphanRecipients();
-      if (alarms + recipients > 0) this.logger.log(`[복구 스윕] alarms=${alarms} recipients=${recipients}`);
+      const cancelled = await this.recipientRepository.cancelPendingOfFinishedAlarms();
+      if (alarms + recipients + cancelled > 0) {
+        this.logger.log(`[복구 스윕] alarms=${alarms} recipients=${recipients} cancelledPending=${cancelled}`);
+      }
     } catch (error) {
       this.logger.error(
         `[복구 스윕 실패] ${error instanceof Error ? error.message : String(error)}`,

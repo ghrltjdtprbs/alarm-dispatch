@@ -167,5 +167,14 @@ describe('PrepareService', () => {
     await f.service.handle({ alarmId: ALARM_ID, type: AlarmType.BULK });
     expect(f.inserted).toEqual([]);
     expect(f.transitions).toEqual([]);
+    expect(f.cancelPendingCalls).toBe(0);
+  });
+
+  it('취소된 알림의 prepare 잡이 재전달되면 적재만 되고 남은 PENDING 을 정리한다', async () => {
+    const f = build({ type: AlarmType.BULK, pages: [{ ids: ['u_1'], nextCursor: null }] });
+    f.alarmStatus = AlarmStatus.CANCELLED;
+    await f.service.handle({ alarmId: ALARM_ID, type: AlarmType.BULK });
+    expect(f.inserted).toEqual([]);
+    expect(f.cancelPendingCalls).toBe(1);
   });
 });

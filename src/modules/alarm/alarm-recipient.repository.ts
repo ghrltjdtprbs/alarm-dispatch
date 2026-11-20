@@ -194,6 +194,20 @@ export class AlarmRecipientRepository {
     );
   }
 
+  /**
+   * 종료(CANCELLED/COMPLETED)된 알림에 남은 PENDING 을 일괄 CANCELLED 로. 취소 직후 prepare 가 적재만 하고 죽으면
+   * 잡이 없는 PENDING 이 남는데, 그 행은 아무 잡도 처리하지 않으므로 복구 스윕이 여기서 정리한다
+   */
+  async cancelPendingOfFinishedAlarms(): Promise<number> {
+    const [, affected] = await this.repo.query<[unknown[], number]>(
+      `UPDATE alarm_recipients r SET status = $1, updated_at = now()
+         FROM alarms a
+        WHERE a.id = r.alarm_id AND r.status = $2 AND a.status = ANY($3)`,
+      [RecipientStatus.CANCELLED, RecipientStatus.PENDING, [AlarmStatus.CANCELLED, AlarmStatus.COMPLETED]],
+    );
+    return affected;
+  }
+
   // 알림 취소 시 아직 손대지 않은 수신자만 일괄 취소. PROCESSING(호출 중) 은 결과대로 남긴다
   async cancelPending(alarmId: string, manager?: EntityManager): Promise<number> {
     const result = await (manager ?? this.repo.manager)
