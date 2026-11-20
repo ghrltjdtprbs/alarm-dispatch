@@ -1,0 +1,123 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/health": {
+      "get": {
+        "description": "API 프로세스가 요청을 받을 수 있는지 확인한다.",
+        "operationId": "HealthController_check",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "성공",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ResponseDTO"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/HealthResponse"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "summary": "헬스체크",
+        "tags": [
+          "Health"
+        ]
+      }
+    }
+  },
+  "info": {
+    "title": "Alarm Dispatch API",
+    "description": "다수 수신자 알림 생성·조회·발송·취소 API",
+    "version": "1.0.0",
+    "contact": {}
+  },
+  "tags": [],
+  "servers": [],
+  "components": {
+    "schemas": {
+      "ErrorBody": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "에러 코드 (ErrorCode.code)",
+            "example": "ALARM_NOT_FOUND"
+          },
+          "details": {
+            "description": "상세 사유 목록 (검증 실패 시 필드별 메시지). 없으면 생략",
+            "example": [
+              "title must be longer than or equal to 1 characters"
+            ],
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "ResponseDTO": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "number",
+            "description": "HTTP 상태 코드",
+            "example": 200
+          },
+          "message": {
+            "type": "object",
+            "description": "응답 메시지. 성공 시 null, 에러 시 사용자 노출 메시지",
+            "example": null,
+            "nullable": true
+          },
+          "data": {
+            "type": "object",
+            "description": "응답 데이터. 에러 시 null",
+            "example": {},
+            "nullable": true
+          },
+          "error": {
+            "description": "에러 정보. 성공 시 생략",
+            "example": {
+              "code": "ALARM_NOT_FOUND"
+            },
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ErrorBody"
+              }
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "서버 상태",
+            "example": "ok"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      }
+    }
+  }
+}
