@@ -15,7 +15,18 @@ export class ErrorCode {
     readonly message: string,
   ) {}
 
-  // 도메인별 에러 코드는 이 위치에 그룹 주석과 함께 추가한다 (예: // ALARM)
+  // ALARM
+  static readonly ALARM_NOT_FOUND = new ErrorCode('ALARM_NOT_FOUND', HttpStatus.NOT_FOUND, '알림을 찾을 수 없습니다.');
+  static readonly ALARM_INVALID_STATUS = new ErrorCode(
+    'ALARM_INVALID_STATUS',
+    HttpStatus.CONFLICT,
+    '현재 상태에서 허용되지 않는 요청입니다.',
+  );
+  static readonly ALARM_RECIPIENTS_INVALID = new ErrorCode(
+    'ALARM_RECIPIENTS_INVALID',
+    HttpStatus.BAD_REQUEST,
+    '수신자 지정이 올바르지 않습니다.',
+  );
 
   // 공통 4xx
   static readonly INVALID_REQUEST = new ErrorCode('INVALID_REQUEST', HttpStatus.BAD_REQUEST, '잘못된 요청입니다.');
