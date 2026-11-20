@@ -1,248 +1,208 @@
-# alarm-dispatch — 다수 수신자 알림 발송 시스템
+# alarm-dispatch
 
-NestJS 로 약 10만 명의 수신자에게 알림을 발송하는 백엔드입니다. REST API 로 알림을 생성·조회·발송 시작·취소하고,
-발송 자체는 별도 워커 프로세스가 외부 발송 API(mock) 의 처리량 제한·일시 오류·타임아웃·영구 실패를 다루며 수행합니다.
+약 10만 명의 수신자에게 알림을 보내는 발송 시스템입니다.
 
-- API 서버(`api`) 와 발송 워커(`worker`) 는 같은 이미지를 다른 진입점(`dist/main.js`, `dist/worker.js`) 으로 실행합니다.
-- 상태의 단일 진실은 PostgreSQL 입니다. 모든 상태 전이는 조건부 원자 UPDATE 로만 일어나므로 API 와 워커가 동시에 같은 행을 건드려도 한 쪽만 성공합니다.
-- Redis + BullMQ 는 잡 분배·우선순위·지연 재시도에, Redis 토큰 버킷은 워커 수와 무관한 전역 처리량 제한에 씁니다.
+API 서버는 알림을 만들고 조회하고 발송을 시작·취소하는 역할만 합니다. 실제 발송은 별도의 워커 프로세스가 맡아서, 외부 발송 API의 처리량 제한(초당 50건)과 일시 오류, 타임아웃, 수신 거부 같은 상황을 처리하면서 수신자 한 명씩 보냅니다.
 
-## 실행 방법
+| 구분 | 선택 | 이유 |
+| --- | --- | --- |
+| 언어 / 프레임워크 | TypeScript, NestJS 11 | 과제 요구사항 |
+| DB | PostgreSQL 16, TypeORM | 조건부 UPDATE와 유니크 제약, `ON CONFLICT DO NOTHING`으로 정합성을 DB에 맡길 수 있습니다. TypeORM은 NestJS 통합과 마이그레이션 CLI가 있습니다 |
+| 큐 | Redis 7, BullMQ | 워커 간 잡 분배, 우선순위, 지연 재시도, 멈춘 잡 복구가 내장되어 있습니다 |
+| 처리량 제한 | Redis Lua 토큰 버킷 | 워커 수와 무관하게 전역으로 초당 호출 수를 제한할 수 있습니다 |
+| HTTP 클라이언트 | Node 내장 fetch | 의존성 없이 타임아웃을 걸 수 있습니다 |
+| 문서 / 테스트 | Swagger(OpenAPI 3.0), Jest, supertest | NestJS 기본 구성입니다 |
 
-요구사항: Docker / Docker Compose. 로컬 개발·테스트는 Node 20 이상 (이미지는 Node 22).
+## 실행하기
+
+Docker Compose만 있으면 됩니다. 테스트를 로컬에서 돌리려면 Node 20 이상이 필요합니다.
 
 ```bash
-cp .env.sample .env                 # 환경변수 (아래 표). 기본값으로 바로 실행됩니다
-docker compose up --build           # api(3000) + worker + mock + postgres + redis
-open http://localhost:3000/docs     # Swagger UI (OpenAPI 3.0 JSON: /docs-json, 파일: docs/openapi.json)
-docker compose up --scale worker=3  # 워커 다중화
+cp .env.sample .env          # 생략해도 기본값으로 동작합니다
+docker compose up --build
 ```
 
-- `.env` 가 없어도 compose 기본값으로 뜹니다. 기동 순서는 healthcheck 로 보장됩니다: postgres·redis → api(기동 시 마이그레이션 적용, `RUN_MIGRATIONS=true`) → api 가 healthy 가 된 뒤 worker. 마이그레이션은 api 한 프로세스만 돌려 워커 여러 대의 `CREATE TABLE` 경합을 피합니다.
-- 기동 로그에 `[API 기동] port=3000 docs=/docs`, `[워커 준비] queue=dispatch concurrency=25` 가 보이면 준비된 것입니다.
+올라오는 서비스는 `api`(3000 포트), `worker`, `mock`(외부 발송 API), `postgres`, `redis` 다섯 개입니다. postgres와 redis가 준비되면 api가 뜨면서 마이그레이션을 적용하고, api가 정상 응답하기 시작하면 worker가 뜹니다.
+
+- Swagger UI: http://localhost:3000/docs
+- OpenAPI JSON: http://localhost:3000/docs-json (파일로는 `docs/openapi.json`)
+
+워커를 여러 대 띄우려면:
+
+```bash
+docker compose up --scale worker=3
+```
 
 테스트:
 
 ```bash
 npm install
-npm test                                                   # 단위 테스트 (인프라 불필요)
-docker compose up -d postgres redis mock && npm run test:e2e   # e2e (.env.test 의 alarm_test DB, 실제 PostgreSQL/Redis)
-npm run lint && npm run build
+npm test                                                       # 단위 테스트
+docker compose up -d postgres redis mock && npm run test:e2e   # e2e
 ```
 
-환경변수 (`.env.sample`):
+### 환경변수
 
-| 키 | 설명 | 기본값 |
+전체 목록과 설명은 `.env.sample`에 있습니다. 발송 동작에 영향을 주는 값은 다음과 같습니다.
+
+| 키 | 기본값 | 설명 |
 | --- | --- | --- |
-| `NODE_ENV` | `local` / `test` / `production` (compose 는 production) | `local` |
-| `API_PORT` | API 호스트 포트 | `3000` |
-| `DB_HOST`, `DB_PORT` | PostgreSQL 접속 (compose 는 `postgres:5432` 로 고정) | `localhost:5432` |
-| `DB_USERNAME`, `DB_PASSWORD`, `DB_NAME` | DB 계정·이름 | `alarm`/`alarm`/`alarm` |
-| `RUN_MIGRATIONS` | 기동 시 마이그레이션 적용. compose 는 api 만 true | `false` |
-| `DB_SYNCHRONIZE` | 로컬 개발용 스키마 자동 동기화. 운영에서는 무시되고 마이그레이션만 사용 | `false` |
-| `REDIS_*` | Redis 접속 | `localhost:6379` |
-| `MOCK_API_BASE_URL` | 외부 발송 mock 주소 (compose 내부는 `http://mock:4000`) | `http://localhost:4000` |
-| `MOCK_API_PORT` | mock 호스트 포트 | `4000` |
-| `SEND_RATE_LIMIT_PER_SEC` | 전역 처리량 제한 (mock 한도 50 에 10% 마진) | `45` |
-| `SEND_REQUEST_TIMEOUT_MS` | 외부 API 요청 타임아웃 (mock 지연 3초 이상을 감안) | `5000` |
-| `SEND_MAX_ATTEMPTS` | 5xx/연결 거부 재시도 상한 (429·타임아웃은 세지 않음) | `5` |
-| `SEND_RECONCILE_DELAY_MS` | 타임아웃(발송됐을 수 있음) 뒤 clientRef 조회까지 대기 | `5000` |
-| `SEND_LEASE_SEC` | 수신자 점유(lease) 시간. 만료 후에도 처리 중이면 워커 사망으로 보고 복구 | `60` |
-| `WORKER_CONCURRENCY` | 워커 프로세스당 동시 처리 잡 수 | `25` |
-| `RECOVERY_SWEEP_INTERVAL_MS` | 고아 잡 복구 스윕 주기 | `60000` |
+| `SEND_RATE_LIMIT_PER_SEC` | 45 | 외부 API 호출 상한. 워커가 몇 대든 합산으로 적용됩니다 |
+| `SEND_REQUEST_TIMEOUT_MS` | 5000 | 외부 API 요청 타임아웃 |
+| `SEND_MAX_ATTEMPTS` | 5 | 5xx 응답 재시도 상한 |
+| `SEND_RECONCILE_DELAY_MS` | 5000 | 타임아웃 뒤 발송 여부를 조회하기까지 대기 |
+| `SEND_LEASE_SEC` | 60 | 수신자 한 명을 점유하는 시간. 지나도 처리 중이면 워커가 죽은 것으로 봅니다 |
+| `WORKER_CONCURRENCY` | 25 | 워커 한 대가 동시에 처리하는 수 |
 
-## 기술 스택과 선택 사유
+## API
 
-과제 필수는 TypeScript + NestJS 뿐이며 나머지는 아래 이유로 골랐습니다.
+기본 경로는 `/api/v1`입니다. 모든 응답은 아래 형태로 감싸져 있고 `code`는 HTTP 상태 코드와 같습니다.
 
-| 영역 | 선택 | 사유 | 대안·트레이드오프 |
-| --- | --- | --- | --- |
-| DB | PostgreSQL 16 | `UPDATE ... WHERE status = ?` 조건부 원자 UPDATE, `(alarm_id, recipient_id)` 유니크, `INSERT ... ON CONFLICT DO NOTHING` 으로 정합성을 DB 가 보장. 10만 행 배치 insert 가 재실행 안전 | MySQL 도 가능하지만 `RETURNING`·부분 인덱스가 없어 조건부 UPDATE 의 결과 확인이 번거로움 |
-| ORM | TypeORM 0.3 | Nest 공식 통합, 마이그레이션 CLI, QueryBuilder 로 조건부 UPDATE 작성이 쉬움 | Prisma 는 락·조건부 UPDATE 가 raw SQL 로 밀려 장점이 줄어듦 |
-| 큐 | Redis 7 + BullMQ | 워커 간 잡 분배(잡 lock)·우선순위·지연 재시도·stalled 잡 복구가 내장 | 잡 10만 개가 Redis 에 수십 MB 올라감. 큐가 유실돼도 DB 상태로 복구 스윕이 재투입 |
-| 처리량 제한 | Redis Lua 토큰 버킷 | 워커 수와 무관한 전역 제한, 긴급/대량이 같은 버킷을 공유. HTTP 호출 직전에만 토큰을 쓰므로 취소된 알림의 no-op 잡은 한도를 소모하지 않음. 429 의 `Retry-After` 도 같은 키에 `pause_until` 로 기록해 모든 워커의 호출을 함께 멈춤 | BullMQ limiter 는 잡 단위·큐 단위라 no-op 잡도 제한에 걸리고, `queue.rateLimit()` 은 worker 에 limiter 옵션이 없으면 무시됨 |
-| HTTP 클라이언트 | Node 내장 `fetch` + `AbortSignal.timeout` | 의존성 없이 타임아웃 처리 | axios 도 무방 |
-| 검증·문서 | class-validator, `@nestjs/swagger` | DTO 한 곳에 검증 규칙과 문서를 같이 둠 | — |
-| 테스트 | Jest + supertest | Nest 기본. e2e 는 실제 PostgreSQL/Redis(`*_test` DB 가 아니면 기동 거부) | — |
-
-## API 사용법
-
-기본 경로 `/api/v1`. 모든 응답은 `{ code, message, data, error? }` 로 감쌉니다 (`code` = HTTP 상태). 전체 스펙은 `docs/openapi.json` 또는 `/docs-json`.
-
-| Method | Path | 설명 | 상태 코드 |
-| --- | --- | --- | --- |
-| POST | `/alarms` | 알림 생성 (BULK 전체 사용자 / URGENT 지정 수신자 1~100명) | 201, 400 |
-| GET | `/alarms?page&size&status&type` | 목록 (생성일 역순, 페이지 0-based) | 200, 400 |
-| GET | `/alarms/{id}` | 단건 + 수신자 상태별 집계(`progress`) | 200, 400, 404 |
-| POST | `/alarms/{id}/send` | 발송 시작 (비동기, CREATED 에서만) | 202, 404, 409 |
-| POST | `/alarms/{id}/cancel` | 발송 취소 (CREATED/PREPARING/SENDING 에서만) | 200, 404, 409 |
-| GET | `/alarms/{id}/recipients?status&page&size` | 수신자별 발송 상태 (실패·미확정 확인용) | 200, 404 |
-
-생성:
-
-```bash
-curl -s -X POST localhost:3000/api/v1/alarms -H 'content-type: application/json' \
-  -d '{"title":"11월 정기 점검 안내","body":"11월 25일 02:00~04:00 서비스 점검이 있습니다."}'
-```
 ```json
-{ "code": 201, "message": null, "data": { "id": "9323718e-...", "type": "BULK", "title": "11월 정기 점검 안내", "body": "...", "status": "CREATED", "createdAt": "2026-11-20T11:26:25.000Z", "updatedAt": "2026-11-20T11:26:25.000Z" } }
+{ "code": 200, "message": null, "data": { ... } }
+{ "code": 409, "message": "SENDING 상태의 알림은 발송 시작할 수 없습니다.", "data": null, "error": { "code": "ALARM_INVALID_STATUS" } }
 ```
 
-긴급 알림 생성 (수신자는 mock 사용자 id):
+| Method | Path | 설명 | 응답 |
+| --- | --- | --- | --- |
+| POST | `/alarms` | 알림 생성 | 201 |
+| GET | `/alarms` | 알림 목록 (`page`, `size`, `status`, `type`) | 200 |
+| GET | `/alarms/{id}` | 알림 단건과 발송 진행 상황 | 200 |
+| POST | `/alarms/{id}/send` | 발송 시작 | 202 |
+| POST | `/alarms/{id}/cancel` | 발송 취소 | 200 |
+| GET | `/alarms/{id}/recipients` | 수신자별 발송 상태 (`status` 필터) | 200 |
+
+오류는 상황에 따라 400(검증 실패), 404(없는 알림), 409(허용되지 않는 상태 전이)로 나뉩니다. 에러 코드 목록은 `src/common/exception/error-code.ts`에 모여 있습니다.
+
+### 사용 예시
+
+알림을 만들고 발송을 시작합니다.
 
 ```bash
-curl -s -X POST localhost:3000/api/v1/alarms -H 'content-type: application/json' \
+curl -X POST localhost:3000/api/v1/alarms \
+  -H 'content-type: application/json' \
+  -d '{"title":"점검 안내","body":"11월 25일 02:00~04:00 서비스 점검이 있습니다."}'
+
+curl -X POST localhost:3000/api/v1/alarms/{id}/send
+```
+
+`type`을 생략하면 전체 사용자에게 보내는 대량 알림(BULK)입니다. 지정한 수신자에게만 먼저 보내는 긴급 알림은 `URGENT`로 만들고 수신자를 1~100명 넘깁니다.
+
+```bash
+curl -X POST localhost:3000/api/v1/alarms \
+  -H 'content-type: application/json' \
   -d '{"type":"URGENT","title":"인증번호","body":"123456","recipientIds":["u_000001","u_000002"]}'
 ```
 
-발송 시작 → 진행 상황 조회:
-
-```bash
-curl -s -X POST localhost:3000/api/v1/alarms/9323718e-.../send      # 202, status: PREPARING
-curl -s localhost:3000/api/v1/alarms/9323718e-...
-```
-```json
-{ "code": 200, "message": null, "data": { "id": "9323718e-...", "status": "SENDING", "...": "...",
-  "progress": { "total": 100000, "pending": 65333, "processing": 33, "sent": 34285, "failed": 348, "unknown": 1, "cancelled": 0 } } }
-```
-
-취소, 실패 수신자 확인:
-
-```bash
-curl -s -X POST localhost:3000/api/v1/alarms/9323718e-.../cancel     # 200, status: CANCELLED
-curl -s 'localhost:3000/api/v1/alarms/9323718e-.../recipients?status=FAILED&size=20'
-```
-
-에러 응답:
+진행 상황은 단건 조회의 `progress`로 봅니다. 수신자 상태별 건수이고 `total`은 그 합입니다.
 
 ```json
-{ "code": 409, "message": "SENDING 상태의 알림은 발송 시작할 수 없습니다.", "data": null, "error": { "code": "ALARM_INVALID_STATUS" } }
-{ "code": 400, "message": "요청 값이 올바르지 않습니다.", "data": null, "error": { "code": "VALIDATION_FAILED", "details": ["title must be longer than or equal to 1 characters"] } }
-{ "code": 404, "message": "알림을 찾을 수 없습니다: ...", "data": null, "error": { "code": "ALARM_NOT_FOUND" } }
+{
+  "code": 200,
+  "message": null,
+  "data": {
+    "id": "9323718e-...",
+    "type": "BULK",
+    "title": "점검 안내",
+    "status": "SENDING",
+    "progress": { "total": 100000, "pending": 65333, "processing": 33, "sent": 34285, "failed": 348, "unknown": 1, "cancelled": 0 }
+  }
+}
 ```
 
-상태 코드 시맨틱: 검증 실패 400, 없는 리소스 404, 허용되지 않는 상태 전이 409, 비동기 수락 202. 에러 코드는 `src/common/exception/error-code.ts` 한 곳에 정의되고 전역 필터가 응답 형식으로 변환합니다.
+실패한 수신자만 보고 싶으면 수신자 목록에 필터를 줍니다.
 
-## 데이터 모델과 상태 전이
-
-`alarms` (id uuid, type, title, body, status) 와 `alarm_recipients` (id bigint, alarm_id, recipient_id, status, attempt_count, lease_until, message_id, last_error, sent_at). 수신자 테이블은 `(alarm_id, recipient_id)` 유니크, `(alarm_id, status)` 인덱스 (진행률 집계·완료 판정·취소 일괄 UPDATE 가 모두 이 조건). 스키마는 `src/migrations` 의 마이그레이션으로만 바뀝니다.
-
-알림 상태:
-
-| from → to | 누가 | 조건 (조건부 UPDATE WHERE) |
-| --- | --- | --- |
-| CREATED → PREPARING | API 발송 시작 | status = CREATED. 실패(affected 0) 면 409 |
-| PREPARING → SENDING | 워커 prepare 잡 완료 | status = PREPARING |
-| SENDING → COMPLETED | 워커, 마지막 수신자 종결 시 | status = SENDING AND 미종결 수신자 0건 |
-| CREATED / PREPARING / SENDING → CANCELLED | API 취소 | status IN (…). 실패 면 409 |
-
-수신자 상태:
-
-```
-PENDING ─(claim)─▶ PROCESSING ─▶ SENT | FAILED(영구: 400, 재시도 소진)
-                       ├─(429 / 5xx 재시도)─▶ PENDING
-                       └─(타임아웃: 발송됐을 수 있음)─▶ UNKNOWN ─(clientRef 조회)─▶ SENT | PENDING(재발송) | CANCELLED
-PENDING ─(알림 취소)─▶ CANCELLED
+```bash
+curl 'localhost:3000/api/v1/alarms/{id}/recipients?status=FAILED'
 ```
 
-완료 판정은 "성공률" 이 아니라 "모든 수신자가 종결(SENT/FAILED/CANCELLED)" 입니다. 일부 수신자는 항상 400 이므로 전원 성공은 불가능하고, 실패 수는 `progress.failed` 와 수신자 목록으로 확인합니다.
+## 설계 설명
 
-## 발송 처리 흐름
+### 상태 모델
+
+알림과 수신자를 따로 둡니다. `alarms`에는 알림 자체의 상태가, `alarm_recipients`에는 수신자 한 명마다 발송 상태가 있습니다. 수신자 테이블은 `(alarm_id, recipient_id)`가 유니크라 적재를 몇 번 다시 해도 중복 행이 생기지 않습니다.
+
+알림 상태는 네 단계로 흐르고, 끝나기 전이면 어디서든 취소할 수 있습니다.
 
 ```
-API   POST /alarms/:id/send ── CREATED→PREPARING (조건부 UPDATE) ── 큐에 prepare 잡 1개 투입
-워커  prepare 잡  BULK:   mock GET /v1/users 를 커서(limit 1000)로 끝까지 읽으며 페이지마다
-                          수신자 1000명 배치 insert(ON CONFLICT DO NOTHING) → send 잡 1000개 addBulk
-                  URGENT: 생성 시 적재된 수신자로 send 잡 투입
-                  끝나면 PREPARING→SENDING
-워커  send 잡 (수신자 1명)
-      [1] claim   조건부 UPDATE: PENDING→PROCESSING + lease_until(펜스), 단 알림이 PREPARING/SENDING 일 때만. 실패면 보내지 않고 종료
-      [2] call    토큰 버킷에서 토큰 획득 → (lease 가 거의 끝났으면 생략) → POST /v1/messages (타임아웃 5초). 트랜잭션 밖
-      [3] settle  조건부 UPDATE(WHERE status = PROCESSING AND lease_until = 내 펜스) 로 결과 기록 → 미종결 0건이면 SENDING→COMPLETED
+CREATED → PREPARING → SENDING → COMPLETED
+    └─────────┴──────────┴──────→ CANCELLED
 ```
 
-외부 API 응답별 처리 (`src/modules/dispatch/send.service.ts`):
+- `CREATED → PREPARING` 발송 시작 API가 바꿉니다.
+- `PREPARING → SENDING` 워커가 수신자 적재를 끝내면 바꿉니다.
+- `SENDING → COMPLETED` 마지막 수신자가 종결되는 순간 바꿉니다. 성공률과 상관없이 모두 종결되면 완료입니다. 일부 수신자는 항상 400이기 때문에 "전원 성공"은 기준이 될 수 없습니다.
+
+수신자 상태는 아래처럼 움직입니다.
+
+```
+PENDING → PROCESSING → SENT | FAILED
+              ├─ 429, 5xx ──→ PENDING (재시도)
+              └─ 타임아웃 ──→ UNKNOWN → 발송 여부 조회 → SENT | 재발송 | CANCELLED
+PENDING → CANCELLED (알림 취소)
+```
+
+모든 상태 변경은 `UPDATE ... WHERE status = ?` 형태의 조건부 UPDATE로만 합니다. 읽고 판단하고 쓰는 과정이 없으니 API와 워커, 워커와 워커가 동시에 같은 행을 건드려도 한쪽만 성공하고, 별도의 락이 필요하지 않습니다.
+
+### 발송 흐름
+
+```
+1. API    발송 시작 요청 → 알림을 PREPARING으로 → 큐에 prepare 잡 하나
+2. Worker prepare 잡: 사용자 API를 1000명씩 커서로 읽어 수신자를 적재하고,
+          페이지마다 send 잡 1000개를 큐에 넣음 → 끝나면 SENDING
+3. Worker send 잡(수신자 1명):
+     claim   PENDING → PROCESSING. 알림이 PREPARING/SENDING일 때만 성공
+     call    토큰 버킷에서 토큰을 받아 외부 API 호출
+     settle  결과를 조건부 UPDATE로 기록. 미종결이 0건이면 알림을 COMPLETED로
+```
+
+외부 API 호출은 트랜잭션 밖에서 합니다. claim과 settle만 각각 짧은 UPDATE입니다.
+
+잡은 수신자 한 명 단위입니다. 배치로 묶으면 느린 응답 하나가 배치 전체를 막고 워커가 죽었을 때 배치 전체를 다시 확인해야 하지만, 한 명 단위면 재시도와 복구가 그 수신자에만 미칩니다.
+
+외부 API 응답은 이렇게 처리합니다.
 
 | 응답 | 처리 |
 | --- | --- |
-| 202 | `SENT`, messageId 저장 |
-| 400 (`RECIPIENT_BLOCKED`, `UNKNOWN_RECIPIENT`) | 재시도 없이 `FAILED`. 재시도는 낭비이고 한도만 소모 |
-| 429 | 보내지지 않은 것으로 보고 `PENDING` 복귀, 시도 횟수 미차감. 토큰 버킷에 `Retry-After` 만큼 `pause_until` 을 기록해 **모든 워커의 외부 호출을 함께 일시정지** |
-| 500 / 503 / 연결 거부(ECONNREFUSED 등) | 서버에 닿지 않았으므로 `attempt_count + 1`, 지수 백오프(1s × 2ⁿ, 최대 30s) 후 재시도. 상한(5회) 도달 시 `FAILED` |
-| 타임아웃 / 소켓 끊김 | 서버가 처리했을 수 있으므로 **재전송하지 않고** `UNKNOWN`. 5초 뒤 `GET /v1/messages?clientRef=` 로 처리 여부를 확인해 있으면 `SENT`, 없으면 그제야 재발송 (알림이 취소됐으면 `CANCELLED`) |
+| 202 | SENT로 기록 |
+| 400 | FAILED. 수신 거부 같은 영구 실패라 재시도하지 않습니다 |
+| 429 | 보내지지 않은 것으로 보고 PENDING으로 되돌립니다. Retry-After 동안 모든 워커의 호출을 멈춥니다. 재시도 횟수에는 세지 않습니다 |
+| 500, 503 | 1초, 2초, 4초 … 지수 백오프로 재시도하고 5회째 실패하면 FAILED |
+| 타임아웃, 소켓 끊김 | 서버가 처리했을 수 있으므로 재전송하지 않고 UNKNOWN으로 둡니다. 5초 뒤 `clientRef`로 발송 여부를 조회해서 있으면 SENT, 없으면 그때 다시 보냅니다. 연결 거부처럼 서버에 닿지 않은 것이 확실한 오류만 5xx와 같이 바로 재시도합니다 |
 
-처리량 제한: Redis Lua 토큰 버킷 (`src/modules/dispatch/rate-limiter.ts`). 보충·차감이 하나의 스크립트라 워커 여러 대가 동시에 와도 초과 발급이 없고, 버킷 용량을 rate 의 10% 로 작게 둬 어떤 1초 창에서도 통과 건수가 `rate + 용량 ≤ 50` 을 넘지 않습니다 (`SEND_RATE_LIMIT_PER_SEC` 상한 45). 사용자 목록 조회와 clientRef 조회도 같은 버킷을 씁니다. 실측(워커 1대, 동시성 25) 약 40 rps, 429 0건.
+`clientRef`는 `{alarmId}:{recipientId}`로 고정합니다. mock은 같은 clientRef를 다시 보내면 그대로 한 번 더 발송하므로 중복 방지는 우리 상태 테이블의 몫이고, clientRef는 타임아웃 뒤에 "실제로 나갔는지" 되묻는 키로 씁니다. BullMQ의 jobId도 같은 규칙으로 만들어서 한 수신자의 잡이 두 번 들어가지 않습니다.
 
-`clientRef` 는 `${alarmId}:${recipientId}` 로 결정적입니다. mock 이 중복을 막지 않으므로 멱등성은 우리 상태 테이블이 책임지고, clientRef 는 타임아웃 뒤 "실제로 보내졌는지" 를 되묻는 키로 씁니다. BullMQ `jobId` 도 같은 규칙(`send-{alarmId}-{recipientId}`)이라 같은 수신자 잡이 두 번 투입되지 않습니다.
+### 처리량 제한
 
-## 동시성·무결성
+Redis에 토큰 버킷을 하나 두고 Lua 스크립트로 토큰을 꺼냅니다. 보충과 차감이 한 스크립트에서 원자적으로 일어나기 때문에 워커가 여러 대여도 합산 초당 45건을 넘지 않습니다. 버킷 용량은 rate의 10%로 작게 잡아서 어느 1초 구간을 잡아도 50건을 넘지 않습니다. 긴급 알림과 대량 알림이 같은 버킷을 씁니다.
 
-| 상황 | 방식 | 이유 |
-| --- | --- | --- |
-| 발송 시작 동시 N회 | `UPDATE alarms SET status='PREPARING' WHERE id=? AND status='CREATED'` → affected 1 인 요청만 큐 투입, 나머지 409 | 읽고-판단하고-쓰는 흐름이 없으니 락·버전 컬럼 없이 DB 가 경합을 끝냄 |
-| 시작 vs 취소 경합 | 둘 다 조건부 UPDATE. 취소는 PREPARING/SENDING 에서도 허용 | 취소가 늦게 와도 워커가 claim 때 알림 상태를 다시 확인하므로 추가 발송 없음 |
-| 워커 간 중복 claim | BullMQ 잡 lock(1차) + 수신자 행 조건부 UPDATE(2차) + lease 펜스(3차) | stalled 로 잡이 두 번 전달돼도 행 상태가 PROCESSING/SENT 면 보내지 않음. 멈췄다 늦게 깨어난 워커는 lease 가 바뀌어 있어 보내지도 기록하지도 못함 |
-| 취소 vs 진행 중 발송 | 취소는 알림 전이 + PENDING 일괄 CANCELLED 를 한 트랜잭션으로. 호출 중(PROCESSING) 건은 결과대로 기록, 큐에 남은 잡은 claim 실패로 no-op (토큰 미소모). 429/5xx 로 뒤늦게 PENDING 으로 돌아온 행은 다음 실행이, 취소 직후 적재만 되고 잡이 없는 행은 복구 스윕이 CANCELLED 로 정리 | 이미 외부로 나간 발송은 되돌릴 수 없음 |
-| 타임아웃 중복 방지 | UNKNOWN 으로 두고 clientRef 조회 후에만 재발송 | 무조건 재전송하면 2% 가 중복, 무조건 실패 처리하면 누락 |
-| 워커 사망 (kill -9) | BullMQ stalled 감지(15초)로 잡 재전달 → 행이 PROCESSING + lease 만료 → 결과 확인 경로. 2차로 주기 스윕이 lease 만료·오래된 UNKNOWN 을 재투입 | 실측: 발송 중 kill -9 → PROCESSING 고아 10건 → 60초 내 전부 복구, 중복 0 |
-| 큐 유실 / 잡 영구 실패 | 스윕이 DB 기준으로 재투입. 큐에 아직 있는 잡은 우선순위만 올리고, 실패로 남은 잡은 지우고 새로 넣음 (실패 잡은 보관하지 않아 같은 jobId 재투입이 막히지 않음) | 상태의 진실이 DB 라 Redis 가 비워져도 이어서 발송 가능 |
-| 워커 종료 순서 | `onModuleDestroy` 에서 BullMQ 워커를 먼저 닫아 진행 중 잡을 끝낸 뒤, `onApplicationShutdown` 에서 토큰 버킷 Redis 연결을 닫음 | 반대로 하면 호출 직전 잡들이 "Connection is closed" 로 실패 |
-| 완료 판정 경합 | 마지막 두 수신자가 동시에 끝나도 `SENDING→COMPLETED` 조건부 UPDATE 는 한 번만 성공 | 카운터 컬럼 증감 대신 `EXISTS` 조회라 핫로우 경합이 없음 |
-| 수신자 적재 중단 | `(alarm_id, recipient_id)` 유니크 + `ON CONFLICT DO NOTHING`, 잡은 jobId 로 dedupe | prepare 잡이 중간에 죽어 다시 돌아도 중복·누락 없음 |
+토큰은 실제 HTTP 호출 직전에만 꺼내므로 취소된 알림의 빈 잡은 한도를 소모하지 않습니다. 429를 받으면 Retry-After를 같은 키에 기록해서 모든 워커의 호출이 함께 멈춥니다.
 
-트랜잭션 경계: 외부 HTTP 호출은 절대 트랜잭션 안에서 하지 않습니다 (커넥션 점유 + 타임아웃 시 롤백해도 외부는 이미 처리됨). claim(짧은 UPDATE) → call → settle(짧은 UPDATE) 세 단계로 나눕니다.
+### 동시성과 장애
 
-## 선택 구현 사항
-
-**긴급 알림 우선 처리** — 같은 큐에서 BullMQ `priority` 를 씁니다 (긴급 prepare 1 / send 2, 대량 prepare 5 / send 10, 숫자가 작을수록 먼저). 대량 발송이 수신자 1명 = 잡 1개로 쪼개져 있어 10만 건 진행 중에도 긴급 잡이 바로 다음 순서에 끼어듭니다. 토큰 버킷은 하나이므로 긴급과 대량이 50 rps 를 함께 씁니다. 긴급 알림의 수신자는 생성 시 `recipientIds` 로 받아 바로 적재하고, 존재 여부는 mock 이 판정합니다 (`UNKNOWN_RECIPIENT` → FAILED).
-
-**워커 다중화** (`docker compose up --scale worker=3`)
-- 작업 분배: BullMQ 가 잡 단위로 워커에 lock 을 주어 분배합니다. 같은 잡이 두 워커에 가는 일은 lock 이 막고, 혹시 stalled 로 재전달돼도 수신자 행의 조건부 UPDATE 가 2차로 막습니다.
-- 처리량 준수: 토큰 버킷이 Redis 에 하나뿐이라 워커가 몇 대든 합산 45 rps 입니다. 429 를 받으면 `queue.rateLimit()` 으로 모든 워커가 함께 멈춥니다.
-- 종료 복구: SIGTERM 은 graceful shutdown(새 잡을 받지 않고 진행 중 잡 완료 후 종료, 실측 1~6초). SIGKILL 은 stalled 감지 → 다른 워커가 잡을 받아 lease 만료 행을 결과 확인 경로로 처리합니다. 주기 스윕이 2차 안전망입니다.
-- 마이그레이션: api 만 적용하고 worker 는 api 가 healthy 가 된 뒤 뜨므로 여러 워커가 동시에 스키마를 만들며 충돌하지 않습니다.
-
-## 테스트 전략
-
-| 종류 | 위치 | 검증 내용 |
-| --- | --- | --- |
-| 단위 (52) | `src/**/*.spec.ts` | 상태 전이 표, 응답 래퍼·예외 필터, 우선순위, **발송 분기 전부**(2xx/400/429/5xx 상한/연결 거부/소켓 끊김/타임아웃/lease 만료/펜스 불일치/결과 확인 4가지), mock 클라이언트 응답 매핑(fetch 스텁), prepare(커서 순회·취소 중단·재시도) 를 fake 로 인프라 없이 |
-| e2e API (27) | `test/alarm.e2e-spec.ts`, `test/health.e2e-spec.ts` | 생성·검증 실패(수신자 101명, 빈 id, 공백 제목, 잘못된 JSON 본문 → 400)·목록·단건·수신자 목록 필터, 발송 시작 **동시 10회 → 1건 202·9건 409·잡 1개**, 시작/취소 경합, 취소 후 수신자 상태 |
-| e2e 리포지토리 (9) | `test/alarm-recipient.repository.e2e-spec.ts` | 실제 PostgreSQL 에서 claim 동시 8회 → 1건 성공, 취소된 알림 claim 거부, settle 은 내 펜스로만, reclaim 은 lease 만료만, 복구 대상 선별(취소된 알림의 PENDING 제외), 적재 재실행 중복 없음 |
-| 수동 시나리오 | 로컬·compose 기동 | 10만 명 발송 완료(sent 99,001 + 차단 999, 미확정 0), 처리량 약 40 rps·429 0건, 발송 중 워커 kill -9 복구, 발송 중 취소, 긴급 알림 끼어들기(대량 진행 중 20명 9초), 현재 코드로 보낸 500명 clientRef 전수 감사 중복 0. compose `--scale worker=3` 에서 api 단독 마이그레이션·3 워커 기동·분배·워커 kill 뒤 16건 복구·취소 확인 |
-
-e2e 는 `.env.test` 의 `alarm_test` DB 와 별도 BullMQ 키 prefix 를 써서 로컬에서 돌고 있는 큐·데이터를 건드리지 않습니다. 테스트 DB 이름이 `_test` 로 끝나지 않으면 기동 자체를 거부합니다.
-
-## 가정 및 해석
-
-| 모호한 점 | 해석 |
+| 상황 | 대응 |
 | --- | --- |
-| 생성 직후 상태, 완료 판정 | `CREATED` 로 생성. 모든 수신자가 종결되면 성공률과 무관하게 `COMPLETED` |
-| 취소 범위 | CREATED/PREPARING/SENDING 에서 가능. 보낸 건은 SENT 유지, 미발송은 CANCELLED, 호출 중 건은 결과대로 |
-| 수신자 적재 시점 | 대량은 발송 시작 시 워커가 mock 사용자 API 로 적재 (10만 건 적재가 수십 초라 API 요청 안에서 하지 않음). 긴급은 생성 시 |
-| 타임아웃 건 | UNKNOWN → clientRef 조회로 확정. mock 이 `GET /v1/messages?clientRef=` 를 제공하는 것을 직접 확인 |
-| 재시도 정책 | 5xx 최대 5회 지수 백오프, 429 는 시도에 안 세고 전역 일시정지, 처리량은 45 rps (10% 마진) |
-| 발송 시작 응답 | 비동기 수락이므로 202 |
-| 긴급 수신자 지정 | `recipientIds` (mock 사용자 id, 1~100). mock 에 단건 조회 API 가 없어 존재 여부는 발송 시 판정 |
-| mock 사용자 API | 커서 페이징(limit ≤ 1000, `nextCursor` null 이 끝) — 직접 호출해 확인 |
+| 발송 시작을 동시에 여러 번 | 조건부 UPDATE에 성공한 한 요청만 큐에 넣고, 나머지는 409 |
+| 발송 시작과 취소가 동시에 | 둘 다 조건부 UPDATE. 워커는 claim할 때 알림 상태를 다시 확인하므로 취소 뒤에는 보내지 않습니다 |
+| 같은 수신자를 두 워커가 | BullMQ 잡 lock이 1차, 수신자 행의 조건부 UPDATE가 2차입니다. claim 때 받은 `lease_until`을 펜스로 써서, 멈췄다가 늦게 깨어난 워커는 보내지도 기록하지도 못합니다 |
+| 발송 중 취소 | 아직 대기 중인 수신자는 CANCELLED, 호출 중인 건은 결과대로 기록합니다. 이미 외부로 나간 발송은 되돌릴 수 없습니다 |
+| 워커가 죽었을 때 | SIGTERM이면 진행 중인 잡을 끝내고 종료합니다. 강제 종료면 BullMQ가 stalled 잡을 다른 워커에 넘기고, lease가 만료된 행은 발송 여부 조회를 거쳐 처리합니다 |
+| 큐가 비워졌을 때 | 주기 스윕이 DB 기준으로 미종결 수신자를 다시 큐에 넣습니다. 상태의 진실은 DB에 있어서 Redis가 날아가도 이어서 보낼 수 있습니다 |
 
-## 고민했던 지점 / 되돌린 결정 / 더 하고 싶은 것
+### 긴급 알림과 워커 다중화
 
-- **잡 단위**: 수신자 100명 배치 잡도 고려했지만, 느린 응답 하나가 배치를 막고 워커 사망 시 배치 전체를 재확인해야 해서 수신자 1명 = 잡 1개로 정했습니다. Redis 메모리(10만 잡 수십 MB)는 감수했고, 완료·실패 잡은 즉시 지웁니다 (이력은 DB 행에 있고, 실패 잡이 남아 있으면 같은 jobId 재투입이 막힙니다).
-- **레이트리밋 위치**: 처음엔 BullMQ limiter 를 생각했지만 잡 단위 제한이라 취소된 알림의 no-op 잡까지 한도를 먹는 문제가 있어, HTTP 호출 직전에만 토큰을 쓰는 Lua 토큰 버킷으로 바꿨습니다.
-- **되돌린 결정 1 — claim 판정**: TypeORM `repository.query()` 가 UPDATE 문에 `[rows, rowCount]` 를 돌려주는 것을 몰라 `rows.length === 1` 로 판정했고, 점유에 성공하고도 "거절" 로 처리돼 발송이 나가지 않았습니다. 복구 스윕이 lease 만료 건을 되살려 겉으로는 "1~2분 늦게 발송" 처럼 보여 원인 찾기가 어려웠습니다. 종료 사유 로그를 추가해 `claim_rejected` 를 확인하고 고쳤으며, 실 DB 리포지토리 e2e 로 고정했습니다. 교훈: 복구 경로가 1차 경로의 버그를 가릴 수 있으니 1차 경로의 결과도 관측해야 합니다.
-- **되돌린 결정 2 — 재시도 잡의 우선순위**: BullMQ 는 지연 후 복귀한 잡을 같은 우선순위의 맨 뒤에 둡니다. 타임아웃 확인(UNKNOWN) 이 10만 건 뒤에서 기다리게 돼, 복귀 전에 `changePriority` 로 대량 잡은 5(긴급 뒤, 대량 앞)로 올리도록 바꿨습니다. 복구 스윕도 큐에 있는 잡은 재투입 대신 우선순위를 올립니다.
-- **동시성 10 → 25**: mock 응답의 5% 가 3초, 2% 가 5초 타임아웃이라 평균 점유가 약 0.35초였고, 10 슬롯으로는 20~25 rps 에 그쳤습니다. 25 로 올려 약 40 rps 를 냅니다.
-- **되돌린 결정 3 — 429 전역 정지와 종료 순서**: 처음엔 BullMQ `queue.rateLimit()` 으로 모든 워커를 멈추려 했지만, worker 에 `limiter` 옵션이 없으면 무시된다는 것을 BullMQ Lua 소스에서 확인하고 토큰 버킷의 `pause_until` 로 바꿨습니다. 또 토큰 버킷 Redis 연결을 `onModuleDestroy` 에서 닫았더니 SIGTERM 때 진행 중 잡 8건이 "Connection is closed" 로 실패하는 것을 발견해, 워커를 먼저 닫고 연결은 `onApplicationShutdown` 에서 닫도록 순서를 바꿨습니다.
-- **되돌린 결정 4 — settle 펜스와 네트워크 오류**: 10만 건 발송 뒤 재시도·타임아웃을 겪은 수신자 5,630명을 clientRef 로 감사해 중복 24건을 찾았습니다. 전부 워커를 여러 대 띄우고 재기동하던 4분 구간에, 소켓이 끊겨 "네트워크 오류" 로 분류된 뒤 무조건 재시도된 건이었습니다(서버는 첫 요청을 이미 처리). 5xx 는 mock 이 기록하지 않음을 실험으로 확인해 재시도를 유지하고, 연결 거부가 아닌 네트워크 오류는 타임아웃처럼 조회로 확정하도록 바꿨습니다. 또 수신자 1명이 17ms 간격으로 두 번 발송된 것을 clientRef 조회로 발견했습니다. 멈췄다 늦게 깨어난 실행이 다른 워커의 재점유 뒤에 보내고 기록까지 덮어쓸 수 있어, claim 때 받은 lease 를 펜스로 삼아 settle 을 `lease_until = 내 펜스` 로 제한하고 토큰을 기다린 뒤 lease 가 거의 끝났으면 보내지 않도록 했습니다.
-- **compose 검증 환경의 한계**: 제출 전 검증은 Apple Silicon 위 colima(x86 에뮬레이션, 2 vCPU) 에서 했습니다. api·worker 3대·postgres·redis·mock 을 모두 에뮬레이션하니 부하가 50을 넘어 처리량이 초당 수 건으로 떨어졌고, 10만 명 완주는 네이티브 Node + Docker mock 조합으로 확인했습니다. 네이티브 환경에서는 10만 명 적재 약 50초, 발송 약 40분입니다.
-- **더 하고 싶은 것**: 알림별 처리량 지표(발송 속도·실패율) 노출, 워커 상태 헬스 엔드포인트(큐 깊이·stalled 수), 긴급 알림 전용 SLA 측정, 취소된 알림의 큐 잔여 잡 즉시 제거(현재는 no-op 로 빠르게 소진), 마이그레이션 기반 schema 변경 테스트.
+긴급 알림은 같은 큐에서 BullMQ priority로 앞에 섭니다(긴급 1~2, 대량 5~10). 대량 발송을 수신자 한 명 단위의 잡으로 쪼개 두었기 때문에 10만 건이 진행 중이어도 긴급 잡이 바로 다음 순서에 끼어듭니다. 재시도로 잠시 지연됐다가 돌아오는 대량 잡은 대량 대기열 맨 뒤로 가지 않도록 우선순위를 5로 올려 둡니다.
 
-## AI 활용 방식
+워커를 여러 대 띄우면 BullMQ가 잡 단위로 분배합니다. 처리량 제한은 Redis에 하나뿐이라 워커 수와 상관없고, 중복 방지는 수신자 행의 조건부 UPDATE가 맡습니다. 마이그레이션은 api 한 프로세스만 적용하고 worker는 api가 정상 응답한 뒤에 뜨도록 해서, 여러 워커가 동시에 스키마를 만들며 충돌하는 일을 피했습니다.
 
-Claude Code 를 설계·구현·검증 전 과정에 썼고, 다음 방식으로 결과를 통제했습니다.
+## 가정과 해석
 
-- 컨벤션 문서와 훅으로 응답 형식·예외·Swagger 문서화·환경변수 동기화·커밋 규칙을 자동 검사했습니다.
-- 과제 분석 → `docs/requirements.md` 에 요구사항 ID·가정·상태 모델·파이프라인을 먼저 확정한 뒤 구현했습니다.
-- mock 서버는 문서 대신 이미지를 직접 띄워 응답 형식·에러 코드·페이징을 확인했고(`docs/mock-api.md`), 동시성·재시도·트랜잭션 코드는 직접 읽고 실제 기동·로그·실 DB 테스트로 검증했습니다.
-- AI 가 틀린 부분을 잡아 고친 사례: 응답 본문 `code` 가 `@HttpCode(201)` 보다 먼저 계산돼 200 으로 찍히던 인터셉터, mock 포트 가정(8080 → 4000), TypeORM UPDATE 반환 형식 오판, BullMQ 지연 복귀 잡의 우선순위.
+과제에 명시되지 않아 다음과 같이 정했습니다.
+
+- 생성 직후 상태는 CREATED이고, 완료는 모든 수신자가 종결된 시점입니다.
+- 취소하면 아직 보내지 않은 수신자만 CANCELLED가 되고 이미 보낸 건은 SENT로 남습니다.
+- 대량 알림의 수신자는 발송 시작 시점에 워커가 적재합니다. 10만 건 적재에 수십 초가 걸려서 API 요청 안에서 하지 않았습니다.
+- 발송 시작 응답은 비동기 수락이므로 202입니다.
+- 긴급 알림의 수신자는 mock 사용자 id 목록으로 받습니다. 단건 조회 API가 없어 존재 여부는 발송 시점에 mock이 판정합니다.
+- 처리량은 10% 마진을 두어 45 rps로 잡았습니다.
+- mock을 직접 호출해 확인한 것: 타임아웃되는 요청도 수신 즉시 기록되고, 5xx 응답은 기록되지 않습니다. 그래서 5xx는 바로 재시도하고 타임아웃은 조회를 거칩니다.
