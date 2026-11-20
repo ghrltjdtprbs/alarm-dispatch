@@ -78,7 +78,8 @@ services:
       - "${DB_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      # 파일 하나를 바인드하면 환경에 따라 디렉터리로 보이는 문제가 있어 디렉터리를 마운트한다
+      - ./docker/postgres:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-alarm} -d ${DB_NAME:-alarm}"]
       interval: 5s
