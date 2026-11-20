@@ -26,6 +26,8 @@ import { typeOrmOptions } from './common/config/typeorm.config';
       inject: [ConfigService],
       useFactory: (config: ConfigService<Configuration, true>) => ({
         connection: config.get('redis', { infer: true }),
+        // e2e 가 같은 Redis 를 쓰더라도 로컬에서 돌고 있는 큐를 비우지 않도록 키 prefix 를 분리한다
+        prefix: config.get('app.env', { infer: true }) === 'test' ? 'bull-test' : 'bull',
       }),
     }),
   ],

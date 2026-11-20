@@ -32,6 +32,17 @@ export class AlarmRepository {
     return qb.getManyAndCount();
   }
 
+  // 복구용: 지정 상태에 너무 오래 머문 알림 (예: prepare 잡이 유실된 PREPARING)
+  findStaleByStatus(status: AlarmStatus, staleSec: number, limit: number): Promise<Alarm[]> {
+    return this.repo
+      .createQueryBuilder('a')
+      .where('a.status = :status', { status })
+      .andWhere("a.updated_at < now() - (:staleSec || ' seconds')::interval", { staleSec: String(staleSec) })
+      .orderBy('a.updatedAt', 'ASC')
+      .limit(limit)
+      .getMany();
+  }
+
   /**
    * 조건부 상태 전이. from 에 있는 상태일 때만 to 로 바꾸고 성공 여부를 돌려준다.
    * 같은 알림에 동시 요청이 와도 DB 가 한 건만 성공시키므로 별도 락이 필요 없다.

@@ -19,8 +19,17 @@ export const envValidationSchema = Joi.object({
   REDIS_PORT: Joi.number().port().default(6379),
 
   MOCK_API_BASE_URL: Joi.string().uri().required(),
-  SEND_RATE_LIMIT_PER_SEC: Joi.number().integer().min(1).default(50),
+  // mock 한도는 50/s. 초 경계 집계 차이로 429 가 나지 않도록 기본값에 10% 마진을 둔다
+  SEND_RATE_LIMIT_PER_SEC: Joi.number().integer().min(1).max(50).default(45),
   SEND_REQUEST_TIMEOUT_MS: Joi.number().integer().min(100).default(5000),
+  // 5xx/네트워크 오류 재시도 상한 (429·타임아웃은 세지 않음)
+  SEND_MAX_ATTEMPTS: Joi.number().integer().min(1).default(5),
+  // 수신자 PROCESSING 점유 시간. 만료 후에도 PROCESSING 이면 워커 사망으로 보고 복구한다
+  SEND_LEASE_SEC: Joi.number().integer().min(10).default(60),
+  // 워커 프로세스당 동시 처리 잡 수. mock 응답의 5% 가 3초, 2% 가 타임아웃(5초)이라 평균 점유 ≈0.35초 → 45 rps 를 채우려면 20 이상 필요
+  WORKER_CONCURRENCY: Joi.number().integer().min(1).default(25),
+  // 고아 수신자(lease 만료·오래된 UNKNOWN/PENDING)·고아 알림 재투입 주기
+  RECOVERY_SWEEP_INTERVAL_MS: Joi.number().integer().min(1000).default(60000),
 });
 
 export type NodeEnv = 'local' | 'test' | 'production';
@@ -50,11 +59,19 @@ export interface MockApiConfig {
   requestTimeoutMs: number;
 }
 
+export interface WorkerConfig {
+  concurrency: number;
+  maxAttempts: number;
+  leaseSec: number;
+  recoverySweepIntervalMs: number;
+}
+
 export interface Configuration {
   app: AppConfig;
   db: DbConfig;
   redis: RedisConfig;
   mockApi: MockApiConfig;
+  worker: WorkerConfig;
 }
 
 // Joi 가 타입 변환·기본값을 끝낸 뒤 호출되므로 여기서는 매핑만 한다
@@ -79,5 +96,11 @@ export const configuration = (): Configuration => ({
     baseUrl: process.env.MOCK_API_BASE_URL as string,
     rateLimitPerSec: Number(process.env.SEND_RATE_LIMIT_PER_SEC),
     requestTimeoutMs: Number(process.env.SEND_REQUEST_TIMEOUT_MS),
+  },
+  worker: {
+    concurrency: Number(process.env.WORKER_CONCURRENCY),
+    maxAttempts: Number(process.env.SEND_MAX_ATTEMPTS),
+    leaseSec: Number(process.env.SEND_LEASE_SEC),
+    recoverySweepIntervalMs: Number(process.env.RECOVERY_SWEEP_INTERVAL_MS),
   },
 });
