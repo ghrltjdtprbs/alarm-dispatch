@@ -1,8 +1,10 @@
 # 외부 발송 mock 서버 동작 요약
 
 - 이미지: `ghcr.io/us-all/backend-assignment-api:1.2` (compose 서비스 `mock`), 컨테이너 포트 **4000** 고정 (`node server.js`)
-- 공식 API 문서: 과제 문서의 apidog 링크 (비밀번호 보호). 원문 사본은 `docs/private/` 에만 둔다.
-- 아래 내용은 2026-11-20 에 이미지를 직접 띄워 확인한 결과다. 기동 로그:
+- 공식 문서(이미지 README)와 2026-11-20 직접 호출로 확인한 내용이다. 원문 사본은 `docs/private/` 에만 둔다.
+- 공식 문서가 명시한 핵심: **처리량 제한은 `POST /v1/messages` 합산 초당 50건** (사용자 조회·발송 내역 조회는 제한 대상 아님), 500/503 은 **발송되지 않음**, 타임아웃 2% 는 발송은 처리되고 응답만 30초 뒤에 옴, 이미지에 `GET /health` 헬스체크 내장.
+- mock 환경변수로 동작을 조정할 수 있다: `RATE_LIMIT`(50), `ERROR_RATE`(0.05), `TIMEOUT_RATE`(0.02), `TIMEOUT_MS`(30000), `SLOW_RATE`(0.05), `SLOW_MS`(3000), `BLOCKED_PERCENT`(1), `USER_COUNT`(100000), `SEED`(42). 로컬에서 빨리 확인하려면 `RATE_LIMIT` 과 `TIMEOUT_MS` 를 조정하면 된다.
+- 기동 로그:
   `notification-mock :4000 users=100000 blocked=999 rate=50/s error=0.05 timeout=0.02(30000ms) slow=0.05(3000ms) seed=42`
   → 사용자 10만 명, 항상 400 인 수신자 999명, 50 rps, 5% 5xx, 2% 30초 무응답, 5% 3초 지연, seed 고정(재현 가능).
 
@@ -31,7 +33,7 @@
 
 | 특성 | 확인 결과 | 설계 시사점 |
 | --- | --- | --- |
-| 처리량 제한 | 120건 동시 요청 시 6건 429, `retry-after: 1` | 워커 수와 무관한 전역 제한(Redis 토큰 버킷). 긴급/대량이 한 버킷 공유 |
+| 처리량 제한 | `POST /v1/messages` 합산 50/s. 120건 동시 요청 시 6건 429, `retry-after: 1` | 워커 수와 무관한 전역 제한(Redis 토큰 버킷). 긴급/대량이 한 버킷 공유. 조회 API 는 토큰을 쓰지 않는다 |
 | 일시 오류 | 5xx 약 5% (`INTERNAL_ERROR`/`SERVICE_UNAVAILABLE`) | 지수 백오프 재시도, 횟수 상한 |
 | 타임아웃 | 약 2% 가 발송은 처리되지만 30초 무응답 | `SEND_REQUEST_TIMEOUT_MS` 로 짧게 끊고 "보냈을 수 있음" 상태로 둔 뒤 clientRef 조회로 확정 |
 | 지연 | 약 5% 가 3초 지연 | 타임아웃은 3초보다 넉넉히(기본 5초). in-flight 수 제한 |

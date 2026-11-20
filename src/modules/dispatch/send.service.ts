@@ -213,7 +213,7 @@ export class SendService {
       return { action: 'retry', delayMs: this.leaseMs, reason: 'processing_elsewhere' };
     }
 
-    await this.limiter.acquire();
+    // 처리량 제한은 POST /v1/messages 에만 적용되므로(mock 문서) 조회는 토큰 없이 바로 한다
     let messageId: string | null;
     try {
       messageId = await this.client.findMessageIdByClientRef(AlarmRecipient.clientRef(alarmId, recipientId));

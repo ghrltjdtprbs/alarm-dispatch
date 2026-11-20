@@ -6,7 +6,6 @@ import { AlarmStatus } from '../alarm/alarm-status.enum';
 import { AlarmType } from '../alarm/alarm-type.enum';
 import { PrepareJobData } from './dispatch-job';
 import { DispatchQueueProducer } from './dispatch-queue.producer';
-import { RATE_LIMITER, RateLimiter } from './rate-limiter';
 import { SEND_CLIENT, SendClient, UserPage } from './send-client';
 
 // mock 사용자 API 최대 limit. 10만 명 = 100 페이지
@@ -28,7 +27,6 @@ export class PrepareService {
     private readonly recipientRepository: AlarmRecipientRepository,
     private readonly producer: DispatchQueueProducer,
     @Inject(SEND_CLIENT) private readonly client: SendClient,
-    @Inject(RATE_LIMITER) private readonly limiter: RateLimiter,
   ) {}
 
   async handle(data: PrepareJobData): Promise<void> {
@@ -98,10 +96,9 @@ export class PrepareService {
     return total;
   }
 
-  // 사용자 API 도 발송 API 와 같은 서버라 토큰을 쓰고, 일시 오류는 백오프 재시도
+  // 사용자 목록 조회는 처리량 제한 대상이 아니다(제한은 POST /v1/messages 합산). 일시 오류만 백오프 재시도
   private async fetchUserPage(cursor: string | null): Promise<UserPage> {
     for (let attempt = 1; ; attempt += 1) {
-      await this.limiter.acquire();
       try {
         return await this.client.listUsers(cursor, USER_PAGE_SIZE);
       } catch (error) {

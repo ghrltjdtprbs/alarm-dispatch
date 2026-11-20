@@ -5,7 +5,6 @@ import { AlarmStatus } from '../alarm/alarm-status.enum';
 import { AlarmType } from '../alarm/alarm-type.enum';
 import { DispatchQueueProducer } from './dispatch-queue.producer';
 import { PrepareService } from './prepare.service';
-import { RateLimiter } from './rate-limiter';
 import { SendClient, UserPage } from './send-client';
 
 const ALARM_ID = '3f1c2a9e-8b1d-4c2a-9f1e-2d3c4b5a6f70';
@@ -92,14 +91,11 @@ function build(options: {
       return Promise.resolve(pages[pageIndex++]);
     },
   };
-  const limiter: RateLimiter = { acquire: () => Promise.resolve(), pause: () => Promise.resolve() };
-
   state.service = new PrepareService(
     alarmRepo as AlarmRepository,
     recipientRepo as AlarmRecipientRepository,
     producer as DispatchQueueProducer,
     client as SendClient,
-    limiter,
   );
   return state;
 }
